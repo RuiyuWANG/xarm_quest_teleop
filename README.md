@@ -14,5 +14,5 @@
    3. Install Python wrapper and test your code, pip install pyrealsense2.
    4. Test your camera connection by running realsense-viewer or test_camera.py.
 3. Camera Calibration
-   
+   Generate checkerboard: https://calib.io/pages/camera-calibration-pattern-generator?srsltid=AfmBOor0sQvMQBZJ_ymCCees492RmNStF6MFV4uo_5e7SV_rAkcbacIO
 4. Evaluate your policy
