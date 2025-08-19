@@ -16,3 +16,11 @@
 3. Camera Calibration
    Generate checkerboard: https://calib.io/pages/camera-calibration-pattern-generator?srsltid=AfmBOor0sQvMQBZJ_ymCCees492RmNStF6MFV4uo_5e7SV_rAkcbacIO
 4. Evaluate your policy
+
+ROS2 Setup
+1. install ros2, e.g. humble, https://docs.ros.org/en/foxy/Releases/Release-Humble-Hawksbill.html
+2. Set the package for the robot and camera: https://github.com/xArm-Developer/xarm_ros2, https://github.com/IntelRealSense/realsense-ros
+3. source ~/ros2_ws/install/setup.zsh
+4. Launch robot: roslaunch xarm_bringup xarm7_server.launch robot_ip:=192.168.1.241 report_type:=dev
+5. launch camera: ros2 launch realsense2_camera rs_launch.py depth_module.enable:=false
+6. run your code
