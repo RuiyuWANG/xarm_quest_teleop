@@ -24,3 +24,6 @@ ROS2 Setup
 4. Launch robot: roslaunch xarm_bringup xarm7_server.launch robot_ip:=192.168.1.241 report_type:=dev
 5. launch camera: ros2 launch realsense2_camera rs_launch.py depth_module.enable:=false
 6. run your code
+
+Aruco marker
+1. https://chev.me/arucogen/
