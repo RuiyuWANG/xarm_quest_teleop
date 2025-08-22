@@ -21,9 +21,10 @@ ROS2 Setup
 1. install ros2, e.g. humble, https://docs.ros.org/en/foxy/Releases/Release-Humble-Hawksbill.html
 2. Set the package for the robot and camera: https://github.com/xArm-Developer/xarm_ros2, https://github.com/IntelRealSense/realsense-ros
 3. source ~/ros2_ws/install/setup.zsh
-4. Launch robot: roslaunch xarm_bringup xarm7_server.launch robot_ip:=192.168.1.241 report_type:=dev
-5. launch camera: ros2 launch realsense2_camera rs_launch.py depth_module.enable:=false
-6. run your code
+4. Enable service by modifying /share/xarm_api/config/xarm_params.yaml in ros2 ws
+5. Launch robot: roslaunch xarm_bringup xarm7_server.launch robot_ip:=192.168.1.241 report_type:=dev
+6. launch camera: ros2 launch realsense2_camera rs_launch.py depth_module.enable:=false
+7. run your code
 
 Aruco marker
 1. https://chev.me/arucogen/
