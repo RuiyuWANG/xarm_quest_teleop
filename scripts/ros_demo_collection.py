@@ -12,19 +12,6 @@ import palm.utils.transform_utils as TUtils
 import rospy
 from asset.robot import XArmRobot
 
-# Robot ip and home pose (joints)
-ROBOT_IP = "192.168.1.244"
-HOME = [0, -45, 0, 45, 0, 90, 0]
-WORKSPACE_STACK = [0.228, -0.13, 0.12, 0.12]
-
-# Camera matrices
-INTRINSICS_FILE = "charuco_intrinsics.npz"
-HAND_EYE_FILE = "handeye_result.npz"
-handeye_data = np.load(HAND_EYE_FILE)
-X_C = handeye_data["base_T_cam"]
-intr_data = np.load(INTRINSICS_FILE)
-K = intr_data["K"]
-
 
 class DemoCollector:
     def __init__(self, save_dir, num_demos, init_range, freq):

@@ -1,0 +1,11 @@
+services:
+  gripper_move: "/xarm/gripper_move"
+  move_joint: "/xarm/move_joint"          # adjust to your stack
+  move_pose: "/xarm/move_line"            # adjust
+  set_ee_twist: "/xarm/vc_set_cartesian_velocity"  # adjust
+  stop: "/xarm/motion_stop"               # adjust
+  home: "/xarm/go_home"                   # adjust
+
+limits:
+  gripper_min: -100
+  gripper_max: 850

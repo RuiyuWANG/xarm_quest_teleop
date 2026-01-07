@@ -1,0 +1,39 @@
+# tests/test_sensors_cameras.py
+import numpy as np
+
+def _fake_image(h=4, w=6):
+    # minimal ROS Image-like object
+    arr = np.arange(h*w*3, dtype=np.uint8).reshape(h, w, 3)
+    return type("Image", (), {"height": h, "width": w, "data": arr.tobytes()})
+
+def test_multicamera_sync_stores_frames(fake_message_filters):
+    from vr_pipeline.sensors.cameras import MultiCamera  # or CameraRig if that's your class
+
+    cams = MultiCamera({
+        "hand": "/hand/camera/color/image_raw",
+        "third": "/third/camera/color/image_raw",
+    })
+
+    cams.clear()
+    cams.fetch_new = True
+
+    # trigger ATS callback manually
+    img1 = _fake_image(4, 6)
+    img2 = _fake_image(4, 6)
+    cams.sync._fire(img1, img2)
+
+    assert cams.frames["hand"] is not None
+    assert cams.frames["third"] is not None
+    assert cams.frames["hand"].shape == (4, 6, 3)
+
+def test_multicamera_does_not_store_when_disabled(fake_message_filters):
+    from vr_pipeline.sensors.cameras import MultiCamera
+
+    cams = MultiCamera({"hand": "/cam"})
+    cams.clear()
+    cams.fetch_new = False
+
+    img = _fake_image()
+    cams.sync._fire(img)
+
+    assert cams.frames["hand"] is None

@@ -21,23 +21,16 @@ from xarm.wrapper import XArmAPI
 
 ip = "192.168.1.244"
 # ip = "192.168.1.244"
-INIT_POSE = [155, 16, 170, 3.14193, 0, 0, 800]
 home = np.array(INIT_POSE)
 x, y, z, roll, pitch, yaw, gripper_open = home
 
 arm = XArmAPI(ip)
-# arm.motion_enable(enable=True)
-# arm.set_mode(2)
-# arm.set_state(state=0)
-# arm.set_gripper_enable(enable=True)
-# arm.set_gripper_mode(mode=0)
-# arm.set_servo_angle(servo_id=8, angle=[0, -45, 0, 45, 0, 90, 0], is_radian=False)
-
-# arm.set_position(
-#     x=x, y=y, z=z, roll=roll, pitch=pitch, yaw=yaw, wait=True, is_radian=True
-# )
-# arm.set_gripper_position(gripper_open, speed=5000, wait=True)
-# arm.set_gripper_position(850, speed=5000, wait=True)
+arm.motion_enable(enable=True)
+arm.set_mode(2)
+arm.set_state(state=0)
+arm.set_gripper_enable(enable=True)
+arm.set_gripper_mode(mode=0)
+arm.set_servo_angle(servo_id=8, angle=[0, -45, 0, 45, 0, 90, 0], is_radian=False)
 
 print('=' * 50)
 print('version:', arm.get_version())
@@ -52,14 +45,3 @@ print('angles(°)(servo_id=1):', arm.get_servo_angle(servo_id=1, is_radian=False
 print('angles(radian)(servo_id=1):', arm.get_servo_angle(servo_id=1, is_radian=True))\
 
 arm.disconnect()
-
-# import h5py
-# import cv2
-# data_path = "../data/real_stack_combined/data.h5"
-
-# with h5py.File(data_path, "r") as f:
-#     print(f.keys())
-#     imgs = f["data"]["episode220"]["obs"]["rgb"]["front_rgb_overlay_tcp_crop"][:]
-#     for img in imgs:
-#         cv2.imshow("img", img)
-#         cv2.waitKey(0)

@@ -1,0 +1,39 @@
+data_root: "../data"
+
+cameras:
+  - name: "hand"
+    rgb: "/hand_cam/camera/color/image_raw"
+    depth: "/hand_cam/camera/aligned_depth_to_color/image_raw"
+    points: "/hand_cam/camera/depth/color/points"
+  - name: "third"
+    rgb: "/third_cam/camera/color/image_raw"
+    depth: "/third_cam/camera/aligned_depth_to_color/image_raw"
+    points: "/third_cam/camera/depth/color/points"
+
+quest:
+  left:
+    pose: "/q2r_left_hand_pose"
+    twist: "/q2r_left_hand_twist"
+    inputs: "/q2r_left_hand_inputs"
+    haptics_pub: "/q2r_left_hand_haptic_feedback"
+  right:
+    pose: "/q2r_right_hand_pose"
+    twist: "/q2r_right_hand_twist"
+    inputs: "/q2r_right_hand_inputs"
+    haptics_pub: "/q2r_right_hand_haptic_feedback"
+
+robot:
+  config: "configs/xarm.yaml"
+
+teleop:
+  control_mode: "ee_twist"   # "ee_pose" or "ee_twist"
+  use_right_hand: true
+  deadman_button: "button_upper"   # from custom inputs msg
+  gripper_axis: "press_index"      # float32
+  gripper_pulse_open: -100
+  gripper_pulse_close: 850
+  max_ee_linear: 0.25              # m/s
+  max_ee_angular: 1.5              # rad/s
+  haptics_on_enable:
+    frequency: 160.0
+    amplitude: 0.3

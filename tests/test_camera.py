@@ -21,11 +21,10 @@ try:
         # color_image = color_image.reshape(IMG_RAW_SIZE)
         color_image = cv2.cvtColor(color_image, cv2.COLOR_BGRA2RGB)
 
-        # h, w = color_image.shape[:2]
-        # margin = int(w - h) // 2
-        # if margin >= 0:
-        #     color_image = color_image[:, margin : margin + h]
-        # print(color_image.shape)
+        h, w = color_image.shape[:2]
+        margin = int(w - h) // 2
+        if margin >= 0:
+            color_image = color_image[:, margin : margin + h]
 
         # Show image
         cv2.imshow('Agentview', color_image)
