@@ -8,8 +8,10 @@ from typing import List, Optional
 
 import rospy
 
-from src.robot.xarm import XArmRobot
-from src.robot.robot_config import HOME_JOINT
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from src.robots.xarm import XArmRobot
+from src.configs.robot_config import HOME_JOINT
 
 
 # --------- USER: set these to your actual bringup launch ----------
@@ -118,7 +120,6 @@ def shutdown_launch(p: subprocess.Popen) -> None:
         except Exception:
             pass
 
-
 def assert_ok(name: str, res) -> None:
     """
     res is expected to be CallResult-like with .ok/.ret/.message
@@ -151,7 +152,7 @@ def main():
         wait_for_services(REQUIRED_SERVICES, timeout_s=30.0)
 
         # Create robot wrapper (blocking)
-        robot = XArmRobot(auto_init=False, wait_for_finish=True)
+        robot = XArmRobot(auto_init=False)
 
         # Wait for state
         robot.wait_for_state(timeout_s=10.0)
@@ -161,8 +162,9 @@ def main():
         print("[test] 1) initialization")
         assert_ok("set_mode(0)", robot.set_mode(0))
         assert_ok("set_state(0)", robot.set_state(0))
+        
         # Open gripper as part of init (optional but matches your idea of init gripper)
-        assert_ok("move_gripper(open)", robot.move_gripper(robot.gripper_max))
+        assert_ok("move_gripper(open)", robot.move_gripper(800))
 
         # 2) Homing
         print("[test] 2) home")
@@ -180,7 +182,7 @@ def main():
         print("[test] 3b) move_to_pose then home")
         # Use current pose and do a tiny delta in z, if pose is available.
         # Your RobotMsg.pose is 6: [x_mm, y_mm, z_mm, r, p, y]
-        pose6 = robot.get_state().pose
+        pose6 = robot.get_state().ee_pose
         pose6 = list(pose6)
         pose6[2] = pose6[2] + 10.0  # +10mm
         assert_ok("move_to_pose(+z)", robot.move_to_pose(pose6, mvvelo=0, mvacc=0, mvtime=0))
@@ -191,8 +193,9 @@ def main():
         # This expects xarm_msgs/MoveVelocity (your earlier check).
         # Typical field is a 6D velocity + time. We'll command small +Z for 0.5s.
         # Units depend on driver; start very small.
-        v = [0.0, 0.0, 5.0, 0.0, 0.0, 0.0]  # (likely mm/s; adjust if needed)
-        assert_ok("velo_move_line_timed", robot.velo_move_line_timed(v, duration=0.5))
+        v = [30,0,0,0,0,0]  # (likely mm/s; adjust if needed)
+        assert_ok("velo_move_line_timed", robot.velo_move_line_timed(v, duration=3))
+        rospy.sleep(2.0) # WAIT for the velocity to actually happen
         assert_ok("home()", robot.home())
 
         print("\n[test] ALL PASSED ✅")

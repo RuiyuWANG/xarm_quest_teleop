@@ -24,13 +24,26 @@ SRV_VELO_MOVE_LINE_TIMED = "/xarm/velo_move_line_timed"
 SRV_GRIPPER_MOVE = "/xarm/gripper_move"
 SRV_GRIPPER_STATE = "/xarm/gripper_state"
 
+# Error
+SRV_CLEAR_ERR = "/xarm/clear_err"
+
+# Mode
+MODE_POSITION = 0
+MODE_EXT_TRAJ = 1
+MODE_FREEDRIVE = 2
+MODE_JOINT_VELO = 4
+MODE_CART_VELO = 5
+MODE_JOINT_ONLINE = 6
+MODE_CART_ONLINE = 7
+
+
 # Default limits
-GRIPPER_MIN = -100
+GRIPPER_MIN = -10
 GRIPPER_MAX = 850
 
 # Default home joint (adjust to your arm; keep same as your example)
-HOME_JOINT = np.deg2rad([0, -45, 0, 45, 0, 90, 0]).tolist()
-
+HOME_JOINT = np.deg2rad([0, -45, 0, 45, 0, 88, 0]).tolist()
+HOME_GRIPPER = GRIPPER_MAX
 
 @dataclass
 class XArmServices:
