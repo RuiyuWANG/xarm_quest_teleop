@@ -1,114 +1,198 @@
+# vr_pipeline/robot/xarm.py
 import rospy
 from dataclasses import dataclass
-from typing import Sequence, Optional
+from typing import List, Optional, Tuple
 
-from geometry_msgs.msg import PoseStamped, Twist
+from xarm_msgs.msg import RobotMsg
+from xarm_msgs.srv import (
+    Move, MoveRequest,
+    GripperMove, GripperMoveRequest,
+    SetInt16,
+    GripperState,
+    # velocity services are also in xarm_msgs on most installs
+    VeloMove, VeloMoveRequest,   # <-- if this import fails, see note below
+)
 
-# Example: you already have these from xarm_ros
-from xarm_msgs.srv import GripperMove, GripperMoveRequest
-
-# You must replace these with the actual service types used by your xarm_ros for joint/pose/velocity/home.
-# The wrappers are correct; just swap srv imports + request fields.
-# from xarm_msgs.srv import MoveJoint, MoveJointRequest
-# from xarm_msgs.srv import MoveLine, MoveLineRequest
-# from xarm_msgs.srv import VcSetCartesianVelocity, VcSetCartesianVelocityRequest
-# from xarm_msgs.srv import MoveHome, MoveHomeRequest
-# from xarm_msgs.srv import Stop, StopRequest
+from .robot_config import (
+    ROBOT_TOPIC,
+    WAIT_FOR_FINISH_PARAM,
+    GRIPPER_MIN, GRIPPER_MAX,
+    HOME_JOINT,
+    XArmServices,
+)
 
 @dataclass
-class XArmServiceNames:
-    gripper_move: str
-    move_joint: str
-    move_pose: str
-    set_ee_twist: str
-    stop: str
-    home: str
+class CallResult:
+    ok: bool
+    ret: int = 0
+    message: str = ""
 
-class RobotXArm:
-    def __init__(self, srv: XArmServiceNames, gripper_min=-100, gripper_max=850):
-        self.srv = srv
+def _as_call_result(res) -> CallResult:
+    # Most xarm services return fields ret + message
+    ret = int(getattr(res, "ret", 0))
+    msg = str(getattr(res, "message", ""))
+    return CallResult(ok=(ret == 0), ret=ret, message=msg)
+
+class XArmRobot:
+    """
+    Minimal xArm service-based wrapper matching your available services list.
+
+    Ensures sequential execution by:
+      - setting /xarm/wait_for_finish = True
+      - checking service return codes before proceeding
+    """
+
+    def __init__(
+        self,
+        services: XArmServices = XArmServices(),
+        home_joint: Optional[List[float]] = None,
+        gripper_min: float = GRIPPER_MIN,
+        gripper_max: float = GRIPPER_MAX,
+        wait_for_finish: bool = True,
+        auto_init: bool = True,
+    ):
+        self.services = services
+        self.home_joint = HOME_JOINT if home_joint is None else home_joint
         self.gripper_min = gripper_min
         self.gripper_max = gripper_max
 
-    # ---------- Gripper ----------
-    def move_gripper(self, gripper_pos: float) -> int:
-        assert isinstance(gripper_pos, (int, float))
-        assert self.gripper_min <= gripper_pos <= self.gripper_max
+        self._latest_robot_msg: Optional[RobotMsg] = None
+        rospy.Subscriber(ROBOT_TOPIC, RobotMsg, self._robot_cb, queue_size=10)
 
-        rospy.wait_for_service(self.srv.gripper_move)
+        # force blocking behavior in xarm_ros services
+        rospy.set_param(WAIT_FOR_FINISH_PARAM, bool(wait_for_finish))
+
+        # Create proxies once
+        self._set_mode = rospy.ServiceProxy(self.services.set_mode, SetInt16)
+        self._set_state = rospy.ServiceProxy(self.services.set_state, SetInt16)
+
+        self._go_home = rospy.ServiceProxy(self.services.go_home, SetInt16)  # go_home often uses SetInt16 (value ignored)
+
+        self._move_joint = rospy.ServiceProxy(self.services.move_joint, Move)
+        self._move_line = rospy.ServiceProxy(self.services.move_line, Move)
+
+        self._velo_move_line_timed = rospy.ServiceProxy(self.services.velo_move_line_timed, VeloMove)
+
+        self._gripper_move = rospy.ServiceProxy(self.services.gripper_move, GripperMove)
+        self._gripper_state = rospy.ServiceProxy(self.services.gripper_state, GripperState)
+
+        if auto_init:
+            self.initialize()
+
+    # ---------------- callbacks / state ----------------
+    def _robot_cb(self, msg: RobotMsg):
+        self._latest_robot_msg = msg
+
+    def wait_for_state(self, timeout_s: float = 5.0) -> RobotMsg:
+        start = rospy.Time.now().to_sec()
+        r = rospy.Rate(200)
+        while not rospy.is_shutdown():
+            if self._latest_robot_msg is not None:
+                return self._latest_robot_msg
+            if rospy.Time.now().to_sec() - start > timeout_s:
+                raise RuntimeError(f"Timeout waiting for {ROBOT_TOPIC}")
+            r.sleep()
+        raise RuntimeError("ROS shutdown")
+
+    # ---------------- internal call helper ----------------
+    def _call(self, srv_name: str, fn, req=None) -> CallResult:
+        rospy.wait_for_service(srv_name)
         try:
-            gripper_serv = rospy.ServiceProxy(self.srv.gripper_move, GripperMove)
-            req = GripperMoveRequest()
-            req.pulse_pos = float(gripper_pos)  # float32
-            res = gripper_serv(req)
-            if getattr(res, "ret", 0) != 0:
-                rospy.logwarn(f"[gripper_move] Failed ret={res.ret} msg={getattr(res, 'message', '')}")
-                return -1
-            return 0
+            res = fn(req) if req is not None else fn()
+            out = _as_call_result(res)
+            if not out.ok:
+                rospy.logwarn(f"[{srv_name}] failed ret={out.ret} msg={out.message}")
+            return out
         except rospy.ServiceException as e:
-            rospy.logerr(f"[gripper_move] Service call failed: {e}")
-            return -1
+            rospy.logerr(f"[{srv_name}] Service call failed: {e}")
+            return CallResult(ok=False, ret=-1, message=str(e))
 
-    # ---------- Motion (replace srv types/fields with your xarm_ros) ----------
-    def move_joints(self, joints_rad: Sequence[float], speed: float = 0.5, acc: float = 0.5) -> int:
+    # ---------------- 1) initialize robot & gripper ----------------
+    def initialize(self) -> CallResult:
         """
-        joints_rad: list of joint angles in radians, length depends on arm DOF.
-        speed/acc: normalized or physical depending on your xarm_ros API.
+        Initialize robot into a usable state.
+        Equivalent to your pattern: set_mode(0), set_state(0), then home.
         """
-        # rospy.wait_for_service(self.srv.move_joint)
-        # try:
-        #     serv = rospy.ServiceProxy(self.srv.move_joint, MoveJoint)
-        #     req = MoveJointRequest()
-        #     req.angles = list(map(float, joints_rad))
-        #     req.speed = float(speed)
-        #     req.acc = float(acc)
-        #     res = serv(req)
-        #     return 0 if res.ret == 0 else -1
-        # except rospy.ServiceException as e:
-        #     rospy.logerr(f"[move_joint] failed: {e}")
-        #     return -1
-        raise NotImplementedError("Wire this to your xarm_ros joint move service type/fields.")
+        r1 = self.set_mode(0)
+        if not r1.ok:
+            return r1
+        r2 = self.set_state(0)
+        if not r2.ok:
+            return r2
+        # home robot + open gripper
+        return self.home()
 
-    def move_pose(self, target: PoseStamped, speed: float = 0.2, acc: float = 0.2) -> int:
-        """
-        target: PoseStamped in robot base frame (or whatever your controller expects).
-        """
-        # rospy.wait_for_service(self.srv.move_pose)
-        # try:
-        #     serv = rospy.ServiceProxy(self.srv.move_pose, MoveLine)
-        #     req = MoveLineRequest()
-        #     req.pose = target  # or req.pose = target.pose depending on srv definition
-        #     req.speed = float(speed)
-        #     req.acc = float(acc)
-        #     res = serv(req)
-        #     return 0 if res.ret == 0 else -1
-        # except rospy.ServiceException as e:
-        #     rospy.logerr(f"[move_pose] failed: {e}")
-        #     return -1
-        raise NotImplementedError("Wire this to your xarm_ros pose move service type/fields.")
+    # ---------------- 2) set mode/state ----------------
+    def set_mode(self, mode: int) -> CallResult:
+        return self._call(self.services.set_mode, self._set_mode, int(mode))
 
-    def set_ee_twist(self, twist: Twist) -> int:
-        """
-        Cartesian velocity control for teleop.
-        """
-        # rospy.wait_for_service(self.srv.set_ee_twist)
-        # try:
-        #     serv = rospy.ServiceProxy(self.srv.set_ee_twist, VcSetCartesianVelocity)
-        #     req = VcSetCartesianVelocityRequest()
-        #     req.twist = twist  # or individual fields depending on srv definition
-        #     res = serv(req)
-        #     return 0 if res.ret == 0 else -1
-        # except rospy.ServiceException as e:
-        #     rospy.logerr(f"[set_ee_twist] failed: {e}")
-        #     return -1
-        raise NotImplementedError("Wire this to your xarm_ros cartesian velocity service type/fields.")
+    def set_state(self, state: int) -> CallResult:
+        return self._call(self.services.set_state, self._set_state, int(state))
 
-    def stop(self) -> int:
-        # rospy.wait_for_service(self.srv.stop)
-        # ...
-        raise NotImplementedError("Wire this to your xarm_ros stop service.")
+    # ---------------- 3) gripper ----------------
+    def get_gripper_state(self) -> Tuple[CallResult, float]:
+        rospy.wait_for_service(self.services.gripper_state)
+        try:
+            res = self._gripper_state()
+            out = _as_call_result(res)
+            if not out.ok:
+                return out, -1.0
+            return out, float(res.curr_pos)
+        except rospy.ServiceException as e:
+            rospy.logerr(f"[{self.services.gripper_state}] Service call failed: {e}")
+            return CallResult(ok=False, ret=-1, message=str(e)), -1.0
 
-    def home(self) -> int:
-        # rospy.wait_for_service(self.srv.home)
-        # ...
-        raise NotImplementedError("Wire this to your xarm_ros home service.")
+
+    def move_gripper(self, pulse_pos: float) -> CallResult:
+        assert isinstance(pulse_pos, (int, float)) and self.gripper_min <= pulse_pos <= self.gripper_max
+        req = GripperMoveRequest()
+        req.pulse_pos = float(pulse_pos)
+        return self._call(self.services.gripper_move, self._gripper_move, req)
+
+    # ---------------- 4) home ----------------
+    def home(self) -> CallResult:
+        """
+        Home robot + open gripper.
+        Uses /xarm/go_home then gripper_move.
+        """
+        # go_home signature varies; on many xarm_ros it's SetInt16 with no meaningful input
+        r1 = self._call(self.services.go_home, self._go_home, 0)
+        if not r1.ok:
+            return r1
+        return self.move_gripper(self.gripper_max)
+
+    # ---------------- 5) move joint / move pose ----------------
+    def move_to_joint(self, joints: List[float], mvvelo: float = 0, mvacc: float = 0, mvtime: float = 0) -> CallResult:
+        assert isinstance(joints, list) and len(joints) == 7
+        req = MoveRequest()
+        req.pose = [float(x) for x in joints]
+        req.mvvelo = float(mvvelo)
+        req.mvacc = float(mvacc)
+        req.mvtime = float(mvtime)
+        return self._call(self.services.move_joint, self._move_joint, req)
+
+    def move_to_pose(self, pose6: List[float], mvvelo: float = 0, mvacc: float = 0, mvtime: float = 0) -> CallResult:
+        """
+        pose6: [x_mm, y_mm, z_mm, roll, pitch, yaw] like your code uses
+        """
+        assert isinstance(pose6, list) and len(pose6) == 6
+        req = MoveRequest()
+        req.pose = [float(x) for x in pose6]
+        req.mvvelo = float(mvvelo)
+        req.mvacc = float(mvacc)
+        req.mvtime = float(mvtime)
+        return self._call(self.services.move_line, self._move_line, req)
+
+    # ---------------- 6) tcp velocity control ----------------
+    def velo_move_line_timed(self, velo: List[float], duration: float) -> CallResult:
+        """
+        Wrap /xarm/velo_move_line_timed.
+
+        velo: [vx, vy, vz, wx, wy, wz] (units are whatever xarm expects; typically mm/s and rad/s, check srv)
+        duration: seconds
+        """
+        assert isinstance(velo, list) and len(velo) == 6
+        req = VeloMoveRequest()
+        req.velo = [float(x) for x in velo]
+        req.duration = float(duration)
+        return self._call(self.services.velo_move_line_timed, self._velo_move_line_timed, req)

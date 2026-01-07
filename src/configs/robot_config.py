@@ -1,0 +1,44 @@
+# vr_pipeline/robot/robot_config.py
+import numpy as np
+from dataclasses import dataclass
+
+# Topics
+ROBOT_TOPIC = "/xarm/xarm_states"
+JOINT_STATES_TOPIC = "/xarm/joint_states"
+
+# Common ROS param used by xarm_ros driver: if True, services block until motion finishes
+WAIT_FOR_FINISH_PARAM = "/xarm/wait_for_finish"
+
+# Services
+SRV_SET_MODE = "/xarm/set_mode"
+SRV_SET_STATE = "/xarm/set_state"
+SRV_GO_HOME = "/xarm/go_home"
+
+SRV_MOVE_JOINT = "/xarm/move_joint"
+SRV_MOVE_LINE = "/xarm/move_line"
+
+# TCP velocity control
+SRV_VELO_MOVE_LINE_TIMED = "/xarm/velo_move_line_timed"
+
+# Gripper
+SRV_GRIPPER_MOVE = "/xarm/gripper_move"
+SRV_GRIPPER_STATE = "/xarm/gripper_state"
+
+# Default limits
+GRIPPER_MIN = -100
+GRIPPER_MAX = 850
+
+# Default home joint (adjust to your arm; keep same as your example)
+HOME_JOINT = np.deg2rad([0, -45, 0, 45, 0, 90, 0]).tolist()
+
+
+@dataclass
+class XArmServices:
+    set_mode: str = SRV_SET_MODE
+    set_state: str = SRV_SET_STATE
+    go_home: str = SRV_GO_HOME
+    move_joint: str = SRV_MOVE_JOINT
+    move_line: str = SRV_MOVE_LINE
+    velo_move_line_timed: str = SRV_VELO_MOVE_LINE_TIMED
+    gripper_move: str = SRV_GRIPPER_MOVE
+    gripper_state: str = SRV_GRIPPER_STATE

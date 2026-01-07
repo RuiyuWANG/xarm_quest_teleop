@@ -18,3 +18,31 @@
 3. Setup cameras.
 
    pass
+
+# ROS SET-up
+1. install ROS in docker
+   source:
+      source /opt/ros/noetic/setup.zsh 2>/dev/null || source /opt/ros/noetic/setup.bash
+      source ~/catkin_ws/devel/setup.zsh 2>/dev/null || source ~/catkin_ws/devel/setup.bash
+
+2. Quest
+   Follow:
+
+3. Robot
+   Follow:
+
+   Test robot connection:
+   roslaunch xarm_bringup xarm7_server.launch robot_ip:=192.168.1.241 report_type:=dev add_gripper:=true
+
+   check Topic Register:
+   rostopic list
+
+   check connection
+   rostopic echo /xarm/xarm_states
+
+   check robot movement
+   rosservice call /xarm/move_joint "{pose: [0,0,0,0,0,0,0], mvvelo: 0.35, mvacc: 7, mvtime: 0, wait: 0}"
+
+   check gripper
+   rosservice call /xarm/gripper_move 500
+
