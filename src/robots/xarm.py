@@ -20,8 +20,11 @@ from src.configs.robot_config import (
     GRIPPER_MIN, GRIPPER_MAX,
     HOME_JOINT, HOME_GRIPPER,
     MODE_CART_VELO, MODE_POSITION,
+    MAX_TCP_LIN_M_S, MAX_TCP_ANG_RAD_S,
+    ABS_SANITY_LIN_M_S, ABS_SANITY_ANG_RAD_S,
     XArmServices,
 )
+from src.utils.robot_utils import speeds6_mps_to_xarm_units
 
 
 @dataclass
@@ -110,6 +113,7 @@ class XArmRobot:
 
         self._gripper_move = rospy.ServiceProxy(self.services.gripper_move, GripperMove)
         self._gripper_state = rospy.ServiceProxy(self.services.gripper_state, GripperState)
+        self._move_servo_cart = rospy.ServiceProxy(self.services.move_servo_cart, Move)
 
         # Optional stop service: only if you added it to XArmServices
         self._motion_ctrl = None
@@ -125,6 +129,8 @@ class XArmRobot:
             r = self.initialize()
             if not r.ok:
                 raise RuntimeError(f"initialize failed: ret={r.ret} msg={r.message}")
+            
+        rospy.loginfo("[XArmRobot] initialized")
 
     # ---------------- signal handling ----------------
     def _on_sigint(self, signum, frame):
@@ -370,16 +376,13 @@ class XArmRobot:
 
     def move_gripper(self, pulse_pos: float) -> CallResult:
         assert isinstance(pulse_pos, (int, float)) and GRIPPER_MIN <= pulse_pos <= GRIPPER_MAX
-        rmode = self.ensure_mode(MODE_POSITION, state=0)
-        if not rmode.ok:
-            return rmode
         req = GripperMoveRequest()
         req.pulse_pos = float(pulse_pos)
         return self._call(self.services.gripper_move, self._gripper_move, req)
 
     # ---------------- 4) home ----------------
     def home(self) -> CallResult:
-        r = self.move_to_joint(HOME_JOINT, mvvelo=0.35, mvacc=7.0, timeout_s=60.0)
+        r = self.move_to_joint(HOME_JOINT)
         if not r.ok:
             return r
         return self.move_gripper(HOME_GRIPPER)
@@ -463,7 +466,7 @@ class XArmRobot:
     # ---------------- 6) cartesian velocity (TIMED BLOCKING) ----------------
     def velo_move_line_timed(
         self,
-        speeds6: List[float],
+        speeds6_mps: List[float],  # m/s + rad/s
         duration: float,
         is_tool_coord: bool = True,
         is_sync: bool = True,
@@ -474,14 +477,25 @@ class XArmRobot:
         Completion is time-based: we sleep duration (+ small margin).
         Optionally wait idle afterwards if your controller returns to idle.
         """
-        assert isinstance(speeds6, list) and len(speeds6) == 6
+        assert isinstance(speeds6_mps, list) and len(speeds6_mps) == 6
 
         rmode = self.ensure_mode(MODE_CART_VELO, state=0)
         if not rmode.ok:
             return rmode
+        
+        try:
+            speeds6_xarm = speeds6_mps_to_xarm_units(
+                speeds6_mps,
+                max_lin_m_s=MAX_TCP_LIN_M_S,
+                max_ang_rad_s=MAX_TCP_ANG_RAD_S,
+                abs_sanity_lin_m_s=ABS_SANITY_LIN_M_S,
+                abs_sanity_ang_rad_s=ABS_SANITY_ANG_RAD_S,
+            )
+        except ValueError as e:
+            return CallResult(False, 1, f"bad speeds6: {e}")
 
         req = MoveVelocityRequest()
-        req.speeds = [float(x) for x in speeds6]
+        req.speeds = [float(x) for x in speeds6_xarm]
         req.is_sync = bool(is_sync)
         req.is_tool_coord = bool(is_tool_coord)
         req.duration = float(duration)
@@ -503,6 +517,66 @@ class XArmRobot:
             self._wait_idle(timeout_s=2.0)
 
         return CallResult(True, 0, "done")
+    
+
+    def enable_servo_cart(self) -> CallResult:
+        """
+        Per xArm Servo_Cartesian doc:
+        motion_ctrl 8 1
+        set_mode 1
+        set_state 0
+        """
+        if self._motion_ctrl is None:
+            # best-effort: still set mode/state
+            r1 = self.set_mode(1)
+            if not r1.ok:
+                return r1
+            r2 = self.set_state(0)
+            return r2
+
+        # motion_ctrl 8 1 (NOTE: motion_ctrl is SetInt16; many xarm drivers interpret "8" as cmd and "1" as enable.
+        # If your motion_ctrl only accepts one int16, you may already wrap it elsewhere. If not, skip this safely.)
+        try:
+            rospy.wait_for_service(self.services.motion_ctrl, timeout=1.0)
+            req = SetInt16Request()
+            req.data = 1  # some drivers use 1 to enable; if yours needs "8 1" you likely have a different srv type.
+            self._motion_ctrl(req)
+        except Exception:
+            pass
+
+        r1 = self.set_mode(1)
+        if not r1.ok:
+            return r1
+        r2 = self.set_state(0)
+        if not r2.ok:
+            return r2
+        return CallResult(True, 0, "servo_cart enabled")
+
+
+    def move_servo_cart(self, pose6_mm_rpy: List[float], tool_coord: bool = False) -> CallResult:
+        """
+        /xarm/move_servo_cart:
+        pose: [X(mm), Y(mm), Z(mm), R(rad), P(rad), Y(rad)]
+        For base coordinate, mvvelo/mvacc/mvtime/mvradii are not effective => pass 0.
+        For tool coordinate (firmware >=1.5.0), set mvtime=1 and pose is treated as tool-relative delta.
+        """
+        assert isinstance(pose6_mm_rpy, list) and len(pose6_mm_rpy) == 6
+
+        # Servo_Cartesian runs in mode 1
+        rmode = self.ensure_mode(1, state=0)
+        if not rmode.ok:
+            return rmode
+
+        req = MoveRequest()
+        req.pose = [float(x) for x in pose6_mm_rpy]
+        req.mvvelo = 0.0
+        req.mvacc = 0.0
+        req.mvtime = 1.0 if tool_coord else 0.0
+        if hasattr(req, "mvradii"):
+            req.mvradii = 0.0
+
+        return self._call(self.services.move_servo_cart, self._move_servo_cart, req)
+
 
     # ---------------- public state snapshot ----------------
     def get_state(self) -> XArmState:

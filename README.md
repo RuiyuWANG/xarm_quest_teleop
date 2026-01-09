@@ -22,19 +22,24 @@
 # ROS SET-up
 1. install ROS in docker
    source:
-      ```
-         source /opt/ros/noetic/setup.zsh 2>/dev/null || source /opt/ros/noetic/setup.bash
-         source ~/catkin_ws/devel/setup.zsh 2>/dev/null || source ~/catkin_ws/devel/setup.bash
-      ```
+   ```
+   source /opt/ros/noetic/setup.zsh 2>/dev/null || source /opt/ros/noetic/setup.bash
+   source ~/catkin_ws/devel/setup.zsh 2>/dev/null || source ~/catkin_ws/devel/setup.bash
+   ```
 
 2. Quest
    Follow:
    ```
-      roslaunch ros_tcp_endpoint endpoint.launch tcp_ip:=192.168.0.182 tcp_port:=10000
+   roslaunch ros_tcp_endpoint endpoint.launch tcp_ip:=192.168.0.182 tcp_port:=10000
    ```
 
    ```
-      rosrun quest2ros ros2quest.py
+   rosrun quest2ros ros2quest.py
+   ```
+
+   check connection
+   ```
+   rostopic list
    ```
 
 3. Robot
@@ -65,3 +70,19 @@
    rosservice call /xarm/gripper_move 500
    ```
 
+# Run Teleop
+1. Warp robot and quest info to get time-stamped topic for sychronization, build teleop_msgs
+   ```
+   cd ~/catkin_ws
+   catkin build teleop_msgs
+
+   source ~/catkin_ws/devel/setup.zsh
+
+   rosmsg show teleop_msgs/OVR2ROSInputsStamped
+   rosmsg show teleop_msgs/RobotMsgStamped
+   ```
+
+   chmod +x ~/catkin_ws/src/cloudgripper_teleop/scripts/robot_state_stamp_node.py
+cd ~/catkin_ws
+catkin build cloudgripper_teleop
+source ~/catkin_ws/devel/setup.zsh

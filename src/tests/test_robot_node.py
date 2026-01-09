@@ -164,7 +164,7 @@ def main():
         assert_ok("set_state(0)", robot.set_state(0))
         
         # Open gripper as part of init (optional but matches your idea of init gripper)
-        assert_ok("move_gripper(open)", robot.move_gripper(800))
+        assert_ok("move_gripper(open)", robot.move_gripper(500))
 
         # 2) Homing
         print("[test] 2) home")
@@ -193,8 +193,8 @@ def main():
         # This expects xarm_msgs/MoveVelocity (your earlier check).
         # Typical field is a 6D velocity + time. We'll command small +Z for 0.5s.
         # Units depend on driver; start very small.
-        v = [30,0,0,0,0,0]  # (likely mm/s; adjust if needed)
-        assert_ok("velo_move_line_timed", robot.velo_move_line_timed(v, duration=3))
+        v = [0.2,0.2,0.2,0,0,0]  # (likely mm/s; adjust if needed)
+        assert_ok("velo_move_line_timed", robot.velo_move_line_timed(v, duration=1/60))
         rospy.sleep(2.0) # WAIT for the velocity to actually happen
         assert_ok("home()", robot.home())
 

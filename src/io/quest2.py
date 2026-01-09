@@ -1,12 +1,6 @@
 # src/io/quest2.py
 """
-Quest2Interface for your Quest2ROS messages.
-
-Matches your demo node:
-  /q2r_*_pose    : geometry_msgs/PoseStamped
-  /q2r_*_twist   : geometry_msgs/Twist
-  /q2r_*_inputs  : quest2ros/OVR2ROSInputs
-  /q2r_*_haptic  : quest2ros/OVR2ROSHapticFeedback (publish)
+Quest2Interface for Quest2ROS messages.
 
 This class:
   - stores latest left/right pose/twist/inputs

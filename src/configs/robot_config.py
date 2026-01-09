@@ -36,10 +36,15 @@ MODE_CART_VELO = 5
 MODE_JOINT_ONLINE = 6
 MODE_CART_ONLINE = 7
 
-
 # Default limits
 GRIPPER_MIN = -10
 GRIPPER_MAX = 850
+
+# TCP Velocity limits
+MAX_TCP_LIN_M_S = 0.25   # m/s
+MAX_TCP_ANG_RAD_S = 1.5  # rad/s
+ABS_SANITY_LIN_M_S = 2.0     # m/s
+ABS_SANITY_ANG_RAD_S = 10.0  # rad/s
 
 # Default home joint (adjust to your arm; keep same as your example)
 HOME_JOINT = np.deg2rad([0, -45, 0, 45, 0, 88, 0]).tolist()
@@ -55,3 +60,6 @@ class XArmServices:
     velo_move_line_timed: str = SRV_VELO_MOVE_LINE_TIMED
     gripper_move: str = SRV_GRIPPER_MOVE
     gripper_state: str = SRV_GRIPPER_STATE
+    move_servo_cart: str = "/xarm/move_servo_cart"
+    motion_ctrl: str = "/xarm/motion_ctrl"
+
