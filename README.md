@@ -71,18 +71,24 @@
    ```
 
 # Run Teleop
-1. Warp robot and quest info to get time-stamped topic for sychronization, build teleop_msgs
+1. Warp robot and quest info to get timestamped topic for sychronization, build teleop_msgs
    ```
    cd ~/catkin_ws
    catkin build teleop_msgs
-
    source ~/catkin_ws/devel/setup.zsh
 
+   ```
+   
+   Test 
+   ```
    rosmsg show teleop_msgs/OVR2ROSInputsStamped
    rosmsg show teleop_msgs/RobotMsgStamped
    ```
 
+2. Add scripts to launch nodes for timestamped topics, build cloudgripper_teleop
+   ```
    chmod +x ~/catkin_ws/src/cloudgripper_teleop/scripts/robot_state_stamp_node.py
-cd ~/catkin_ws
-catkin build cloudgripper_teleop
-source ~/catkin_ws/devel/setup.zsh
+   cd ~/catkin_ws
+   catkin build cloudgripper_teleop
+   source ~/catkin_ws/devel/setup.zsh
+   ```
