@@ -86,8 +86,8 @@ class TeleopConfig:
     # Pose-delta teleop mapping (Quest pose -> robot target pose)
     # ==============================
     # Quest delta position is in meters; robot TCP position is in millimeters.
-    pos_scale: float = 1.0          # dimensionless multiplier on quest delta position
-    rot_scale: float = 1.0          # dimensionless multiplier on quest delta rotation (axis-angle)
+    pos_scale: float = 0.3          # dimensionless multiplier on quest delta position
+    rot_scale: float = 0.25         # dimensionless multiplier on quest delta rotation (axis-angle)
 
     # Map Quest delta axes into robot base/tool axes.
     # dp_robot = R_pos_map @ dp_quest
@@ -113,12 +113,13 @@ class TeleopConfig:
     # ==============================
     enable_gripper: bool = True
     grip_rate_limit_s: float = 0.12
-    grip_change_eps: float = 8.0
-    grip_continuous: bool = False
+    grip_change_eps: float = 5.0
+    grip_continuous: bool = True
+    grip_speed: float = 0.2
 
     # close amount = press_index - press_middle (clamped 0..1)
     grip_close_from_index: bool = True
-    grip_open_from_middle: bool = False
+    grip_open_from_middle: bool = True
 
     # ==============================
     # Haptics
@@ -143,9 +144,21 @@ class TeleopConfig:
     # MUST be < 10mm per update
     servo_max_step_mm: float = 8.0      # keep below 10mm
     servo_max_step_rot_rad: float = 0.05  # ~3 degrees
+    
+    # Servo loop rate (fixed-rate streaming)
+    servo_rate_hz: float = 100.0   # 50~100 recommended
 
-    # button fields used by teleop
-    deadman_field: str = "button_lower"
-    enable_reset: bool = True
-    reset_field: str = "button_upper"
-    clear_reference_on_deadman_release: bool = True
+    # Step limits (xArm requirement: <10mm)
+    servo_max_step_mm: float = 6.0
+    servo_max_step_rot_rad: float = 0.05
+
+    # Adaptive filter (Vive-style)
+    pose_ema_alpha_slow: float = 0.35
+    pose_ema_bypass_mm: float = 15.0
+    pose_ema_bypass_rot_rad: float = 0.14   # ~8 deg
+    pose_clamp_mm: float = 30.0
+    pose_clamp_rot_rad: float = 0.21        # ~12 deg
+
+    # Smooth re-engagement
+    reengage_steps: int = 30
+

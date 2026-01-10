@@ -47,7 +47,8 @@ ABS_SANITY_LIN_M_S = 2.0     # m/s
 ABS_SANITY_ANG_RAD_S = 10.0  # rad/s
 
 # Default home joint (adjust to your arm; keep same as your example)
-HOME_JOINT = np.deg2rad([0, -45, 0, 45, 0, 88, 0]).tolist()
+# HOME_JOINT = np.deg2rad([0, -45, 0, 45, 0, 88, 0]).tolist()
+HOME_JOINT = np.deg2rad([0, -60, -5, 21, -5, 80, 0]).tolist()
 HOME_GRIPPER = GRIPPER_MAX
 
 @dataclass

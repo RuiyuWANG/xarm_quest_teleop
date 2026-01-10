@@ -569,8 +569,8 @@ class XArmRobot:
 
         req = MoveRequest()
         req.pose = [float(x) for x in pose6_mm_rpy]
-        req.mvvelo = 0.0
-        req.mvacc = 0.0
+        req.mvvelo = 100.0
+        req.mvacc = 2000.0
         req.mvtime = 1.0 if tool_coord else 0.0
         if hasattr(req, "mvradii"):
             req.mvradii = 0.0

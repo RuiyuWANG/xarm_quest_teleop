@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import rospy
@@ -23,7 +23,6 @@ from src.utils.teleop_utils import (
     rot_to_axis_angle,
     wrap_to_pi,
     vec_clamp_norm,
-    ema_vec,
     LatchedReference,
 )
 
@@ -32,17 +31,12 @@ from src.utils.teleop_utils import (
 class SyncedSample:
     stamp_ros: float
     stamp_sync: float
-
     quest_pose: PoseStamped
     quest_inputs: OVR2ROSInputsStamped
-
     robot_state_msg: RobotMsg
     robot_state: XArmState
-
-    # pose servo info
     desired_pose6_mm_rpy: Optional[List[float]]
     cmd_pose6_mm_rpy: Optional[List[float]]
-
     cmd_gripper: Optional[float]
     cameras: Dict[str, Optional[Image]]
 
@@ -76,16 +70,78 @@ class CameraBuffer:
         return best
 
 
+def _smoothstep01(t: float) -> float:
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    return t * t * (3.0 - 2.0 * t)
+
+
+class AdaptivePoseFilter:
+    """
+    Vive-style filter:
+      - clamp per-frame spikes (pos, rot)
+      - bypass EMA on big moves (no lag)
+      - EMA only for micro-jitter
+    Units:
+      - position in mm
+      - rotation in rad (RPY)
+    """
+    def __init__(
+        self,
+        ema_alpha_slow: float,
+        ema_bypass_mm: float,
+        ema_bypass_rot_rad: float,
+        clamp_mm: float,
+        clamp_rot_rad: float,
+    ):
+        self.ema_alpha_slow = float(ema_alpha_slow)
+        self.ema_bypass_mm = float(ema_bypass_mm)
+        self.ema_bypass_rot_rad = float(ema_bypass_rot_rad)
+        self.clamp_mm = float(clamp_mm)
+        self.clamp_rot_rad = float(clamp_rot_rad)
+        self._last: Optional[np.ndarray] = None  # 6
+
+    def reset(self):
+        self._last = None
+
+    def _clamp_step(self, dpos_mm: np.ndarray, drot_rad: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        # clamp by norm, separately
+        dpos_mm = vec_clamp_norm(dpos_mm.astype(np.float32), self.clamp_mm)
+        drot_rad = vec_clamp_norm(drot_rad.astype(np.float32), self.clamp_rot_rad)
+        return dpos_mm, drot_rad
+
+    def apply(self, pose6_mm_rpy: np.ndarray, bypass: bool = False) -> np.ndarray:
+        if self._last is None:
+            self._last = pose6_mm_rpy.copy()
+            return pose6_mm_rpy
+
+        d = pose6_mm_rpy - self._last
+        d[:3], d[3:6] = self._clamp_step(d[:3], wrap_to_pi(d[3:6]))
+
+        clamped = self._last + d
+        clamped[3:6] = wrap_to_pi(clamped[3:6])
+
+        pos_step = float(np.linalg.norm(d[:3]))
+        rot_step = float(np.linalg.norm(d[3:6]))
+
+        if bypass or (pos_step > self.ema_bypass_mm) or (rot_step > self.ema_bypass_rot_rad):
+            self._last = clamped
+            return clamped
+
+        a = max(0.0, min(1.0, self.ema_alpha_slow))
+        out = (1.0 - a) * self._last + a * clamped
+        out[3:6] = wrap_to_pi(out[3:6])
+        self._last = out
+        return out
+
+
 class QuestXArmTeleopSync:
     """
-    Pose-delta teleop using xArm Servo_Cartesian:
-      - sync: PoseStamped (stamped wrapper) + InputsStamped + RobotMsg
-      - latch reference on deadman press or reset
-      - desired TCP pose = ref_tcp + mapped(delta_quest_pose)
-      - command TCP pose each tick via /xarm/move_servo_cart
-        BUT ONLY small steps toward desired:
-          - max step translation <= 10mm (xArm requirement)
-          - max step rotation <= cfg.servo_max_step_rot_rad
+    Improved Servo_Cartesian teleop:
+      - ATS callback only stores latest synced inputs
+      - Fixed-rate timer loop (cfg.servo_rate_hz) sends /move_servo_cart
+      - Vive-style adaptive filter + spike clamp + EMA bypass
+      - Smooth re-engagement after relatch/reset
+      - Step-limited servo commands (<10mm each update)
     """
 
     def __init__(self, cfg: TeleopConfig, quest: Quest2Interface, robot: XArmRobot):
@@ -97,17 +153,34 @@ class QuestXArmTeleopSync:
         self._last_grip_cmd_time = 0.0
         self._last_grip_pulse: Optional[float] = None
 
-        # reference
+        # reference latch
         self._ref: Optional[LatchedReference] = None
+        self._deadman_prev: bool = False
 
-        # filtered deltas (Quest -> robot)
-        self._filt_dp_m = np.zeros(3, dtype=np.float32)
-        self._filt_daa = np.zeros(3, dtype=np.float32)  # axis-angle vector (rad)
+        # latest synced messages (from ATS)
+        self._latest_pose: Optional[PoseStamped] = None
+        self._latest_inputs: Optional[OVR2ROSInputsStamped] = None
+        self._latest_robotmsg: Optional[RobotMsg] = None
+        self._latest_sync_stamp: float = 0.0
 
         # cameras
         self._cams: Dict[str, CameraBuffer] = {
             t: CameraBuffer(t, keep_s=cfg.camera_buffer_seconds) for t in cfg.camera_image_topics
         }
+
+        # adaptive filter on DESIRED pose (mm+rpy)
+        self._pose_filter = AdaptivePoseFilter(
+            ema_alpha_slow=cfg.pose_ema_alpha_slow,
+            ema_bypass_mm=cfg.pose_ema_bypass_mm,
+            ema_bypass_rot_rad=cfg.pose_ema_bypass_rot_rad,
+            clamp_mm=cfg.pose_clamp_mm,
+            clamp_rot_rad=cfg.pose_clamp_rot_rad,
+        )
+
+        # smooth re-engagement
+        self._reengaging: bool = False
+        self._reengage_i: int = 0
+        self._last_sent_pose: Optional[np.ndarray] = None  # 6
 
         # select hand topics
         if cfg.active_hand == "right":
@@ -117,7 +190,7 @@ class QuestXArmTeleopSync:
             pose_topic = cfg.left_pose_stamped_topic
             inputs_topic = cfg.left_inputs_stamped_topic
 
-        # message_filters subscribers
+        # ATS subs
         self.pose_sub = message_filters.Subscriber(pose_topic, PoseStamped)
         self.inputs_sub = message_filters.Subscriber(inputs_topic, OVR2ROSInputsStamped)
         self.robot_sub = message_filters.Subscriber(cfg.robot_state, RobotMsg)
@@ -128,51 +201,72 @@ class QuestXArmTeleopSync:
             slop=float(cfg.sync_slop_s),
             allow_headerless=bool(cfg.sync_allow_headerless),
         )
-        self.sync.registerCallback(self._synced_cb)
+        self.sync.registerCallback(self._ats_cb)
 
-        rospy.loginfo("[QuestXArmTeleopSyncServoCart] ATS ready (servo_cart)")
+        rospy.loginfo("[QuestXArmTeleopSync] ATS ready (servo_cart + fixed-rate loop)")
 
-        # optional: configure servo_cart mode here
         if cfg.servo_auto_configure:
             self._configure_servo_cart_mode()
 
+        # fixed-rate servo loop
+        period = 1.0 / float(cfg.servo_rate_hz)
+        self._timer = rospy.Timer(rospy.Duration(period), self._servo_tick, oneshot=False)
+
+    def register_hook(self, fn: Callable[[SyncedSample], None]):
+        self._hooks.append(fn)
+
     def _configure_servo_cart_mode(self):
-        """
-        Per xArm docs for Servo_Cartesian:
-          motion_ctrl 8 1
-          set_mode 1
-          set_state 0
-        """
-        rospy.loginfo("[teleop] configuring servo_cart mode (motion_ctrl 8 1, mode=1, state=0)")
+        rospy.loginfo("[teleop] configuring servo_cart mode (mode=1 state=0)")
         r = self.robot.enable_servo_cart()
         if not r.ok:
             rospy.logwarn(f"[teleop] enable_servo_cart failed: {r.ret} {r.message}")
 
-    def register_hook(self, fn: Callable[[SyncedSample], None]):
-        self._hooks.append(fn)
+    # ---------------- input helpers ----------------
+    def _deadman(self, inputs_st: OVR2ROSInputsStamped) -> bool:
+        if not self.cfg.require_deadman:
+            return True
+        return bool(getattr(inputs_st.inputs, self.cfg.deadman_field, False))
+
+    def _reset_pressed(self, inputs_st: OVR2ROSInputsStamped) -> bool:
+        if not self.cfg.enable_reset:
+            return False
+        return bool(getattr(inputs_st.inputs, self.cfg.reset_field, False))
 
     # ---------------- gripper ----------------
     def _compute_gripper_pulse(self, inputs_st: OVR2ROSInputsStamped) -> Optional[float]:
         if not self.cfg.enable_gripper:
             return None
+
         inp = inputs_st.inputs
+
         close_u = float(getattr(inp, "press_index", 0.0)) if self.cfg.grip_close_from_index else 0.0
-        open_u = float(getattr(inp, "press_middle", 0.0)) if self.cfg.grip_open_from_middle else 0.0
+        open_u  = float(getattr(inp, "press_middle", 0.0)) if self.cfg.grip_open_from_middle else 0.0
+
         close_u = clamp(close_u, 0.0, 1.0)
-        open_u = clamp(open_u, 0.0, 1.0)
-        u = clamp(close_u - open_u, 0.0, 1.0)
-        pulse = (1.0 - u) * (GRIPPER_MAX - GRIPPER_MIN) + GRIPPER_MIN
+        open_u  = clamp(open_u, 0.0, 1.0)
+
+        # close amount = press_index - press_middle
+        u = clamp(open_u - close_u, -1.0, 1.0)
+
+        # Incremental control around last pulse
+        if self._last_grip_pulse is None:
+            pulse = (GRIPPER_MAX + GRIPPER_MIN) * 0.5
+        else:
+            pulse = self._last_grip_pulse
+
+        step = u * (GRIPPER_MAX - GRIPPER_MIN) * float(self.cfg.grip_speed)
+        pulse += step
+
         return float(clamp(pulse, GRIPPER_MIN, GRIPPER_MAX))
+
 
     def _maybe_command_gripper(self, pulse: float) -> Optional[float]:
         now = time.time()
         if now - self._last_grip_cmd_time < float(self.cfg.grip_rate_limit_s):
             return None
-
         if (not self.cfg.grip_continuous) and (self._last_grip_pulse is not None):
             if abs(pulse - self._last_grip_pulse) < float(self.cfg.grip_change_eps):
                 return None
-
         r = self.robot.move_gripper(pulse)
         if r.ok:
             self._last_grip_cmd_time = now
@@ -185,11 +279,9 @@ class QuestXArmTeleopSync:
         if not self.cfg.enable_haptics:
             return
         hand = self.cfg.active_hand
-
         if robot_state.err is not None and int(robot_state.err) != 0:
             self.quest.vibrate(hand, self.cfg.err_haptic_freq, self.cfg.err_haptic_amp)
             return
-
         if deadman and self.cfg.require_deadman:
             self.quest.vibrate(hand, self.cfg.deadman_haptic_freq, self.cfg.deadman_haptic_amp)
         else:
@@ -202,91 +294,62 @@ class QuestXArmTeleopSync:
             out[topic] = buf.nearest(t_sync, window=float(self.cfg.camera_match_window_s))
         return out
 
-    # ---------------- pose delta helpers ----------------
-    def _deadman(self, inputs_st: OVR2ROSInputsStamped) -> bool:
-        if not self.cfg.require_deadman:
-            return True
-        return bool(getattr(inputs_st.inputs, self.cfg.deadman_field, False))
-
-    def _reset_pressed(self, inputs_st: OVR2ROSInputsStamped) -> bool:
-        if not self.cfg.enable_reset:
-            return False
-        return bool(getattr(inputs_st.inputs, self.cfg.reset_field, False))
-
+    # ---------------- latch + mapping ----------------
     def _latch_reference(self, pose: PoseStamped, robot_state: XArmState) -> bool:
         if robot_state.ee_pose is None or len(robot_state.ee_pose) < 6:
             return False
 
         p = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z], dtype=np.float32)
-        q = np.array(
-            [pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w],
-            dtype=np.float32,
-        )
+        q = np.array([pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w],
+                     dtype=np.float32)
         Rq = quat_xyzw_to_rot(q)
 
-        ref_tcp = np.array(robot_state.ee_pose[:6], dtype=np.float32)  # [mm,mm,mm,r,p,y] (rad)
+        ref_tcp = np.array(robot_state.ee_pose[:6], dtype=np.float32)  # [mm,mm,mm,r,p,y]
         self._ref = LatchedReference(quest_pos_m=p, quest_rot=Rq, robot_pose6_mm_rpy=ref_tcp)
 
-        self._filt_dp_m[:] = 0.0
-        self._filt_daa[:] = 0.0
+        # reset filters + re-engage
+        self._pose_filter.reset()
+        self._reengaging = True
+        self._reengage_i = 0
 
-        rospy.loginfo("[teleop] reference latched")
+        rospy.loginfo("[teleop] reference latched (re-engage)")
         return True
 
     def _compute_desired_pose6(self, pose: PoseStamped) -> Optional[np.ndarray]:
-        """
-        desired TCP pose (absolute) in xArm representation:
-          [mm,mm,mm, roll rad, pitch rad, yaw rad]
-        """
         if self._ref is None:
             return None
 
         p = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z], dtype=np.float32)
-        q = np.array(
-            [pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w],
-            dtype=np.float32,
-        )
+        q = np.array([pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w],
+                     dtype=np.float32)
         Rq = quat_xyzw_to_rot(q)
 
-        # Quest delta
+        # delta in Quest frame
         dp_m = p - self._ref.quest_pos_m
         R_delta = self._ref.quest_rot.T @ Rq
         daa = rot_to_axis_angle(R_delta)  # axis-angle vector (rad)
 
-        # Map + scale into robot space
+        # map + scale into robot space
         dp_robot_m = (self.cfg.R_pos_map @ dp_m) * float(self.cfg.pos_scale)
         daa_robot = (self.cfg.R_rot_map @ daa) * float(self.cfg.rot_scale)
 
-        # Filter deltas
-        self._filt_dp_m = ema_vec(self._filt_dp_m, dp_robot_m, self.cfg.delta_filter_alpha)
-        self._filt_daa = ema_vec(self._filt_daa, daa_robot, self.cfg.delta_filter_alpha)
-
-        # Clamp deltas (safety)
-        self._filt_dp_m = vec_clamp_norm(self._filt_dp_m, float(self.cfg.max_delta_pos_m))
-        self._filt_daa = vec_clamp_norm(self._filt_daa, float(self.cfg.max_delta_rot_rad))
+        # clamp absolute delta (safety)
+        dp_robot_m = vec_clamp_norm(dp_robot_m.astype(np.float32), float(self.cfg.max_delta_pos_m))
+        daa_robot = vec_clamp_norm(daa_robot.astype(np.float32), float(self.cfg.max_delta_rot_rad))
 
         desired = self._ref.robot_pose6_mm_rpy.copy()
-        desired[:3] = self._ref.robot_pose6_mm_rpy[:3] + (self._filt_dp_m * 1000.0)  # m -> mm
-
+        desired[:3] = self._ref.robot_pose6_mm_rpy[:3] + (dp_robot_m * 1000.0)  # m->mm
         if self.cfg.enable_orientation:
-            desired[3:6] = wrap_to_pi(self._ref.robot_pose6_mm_rpy[3:6] + self._filt_daa)
-
+            desired[3:6] = wrap_to_pi(self._ref.robot_pose6_mm_rpy[3:6] + daa_robot)
         return desired
 
     def _step_toward_desired(self, cur6: np.ndarray, desired6: np.ndarray) -> np.ndarray:
-        """
-        Servo-cart requires small step from current TCP.
-        - translation step <= cfg.servo_max_step_mm (MUST < 10mm)
-        - rotation step <= cfg.servo_max_step_rot_rad
-        """
         cmd = cur6.copy()
 
-        # position step
         dp_mm = desired6[:3] - cur6[:3]
-        dp_mm = vec_clamp_norm(dp_mm.astype(np.float32), float(self.cfg.servo_max_step_mm))
+        dp_mm = vec_clamp_norm(dp_mm.astype(np.float32), float(self.cfg.servo_max_step_mm))  # MUST < 10mm
         cmd[:3] = cur6[:3] + dp_mm
 
-        # rotation step
         if self.cfg.enable_orientation:
             dr = wrap_to_pi(desired6[3:6] - cur6[3:6])
             dr = vec_clamp_norm(dr.astype(np.float32), float(self.cfg.servo_max_step_rot_rad))
@@ -296,57 +359,95 @@ class QuestXArmTeleopSync:
 
         return cmd
 
-    # ---------------- callback ----------------
-    def _synced_cb(self, pose: PoseStamped, inputs_st: OVR2ROSInputsStamped, robot_st: RobotMsg):
-        rospy.loginfo_throttle(1.0, "[teleop] servo_cart sync callback")
+    # ---------------- ATS callback (store latest only) ----------------
+    def _ats_cb(self, pose: PoseStamped, inputs_st: OVR2ROSInputsStamped, robot_st: RobotMsg):
+        self._latest_pose = pose
+        self._latest_inputs = inputs_st
+        self._latest_robotmsg = robot_st
+        self._latest_sync_stamp = pose.header.stamp.to_sec()
+
+    # ---------------- fixed-rate servo tick ----------------
+    def _servo_tick(self, _event):
+        if rospy.is_shutdown():
+            return
+
+        pose = self._latest_pose
+        inputs_st = self._latest_inputs
+        robot_st = self._latest_robotmsg
+
+        if pose is None or inputs_st is None or robot_st is None:
+            return
 
         stamp_ros = rospy.Time.now().to_sec()
-        stamp_sync = pose.header.stamp.to_sec()
+        stamp_sync = float(self._latest_sync_stamp)
+
+        robot_state = self.robot.get_state()
 
         deadman = self._deadman(inputs_st)
-        robot_state = self.robot.get_state()
         self._haptics(deadman, robot_state)
 
         allow = deadman if self.cfg.require_deadman else True
         if robot_state.err is not None and int(robot_state.err) != 0:
             allow = False
 
+        # edge detection for deadman press
+        deadman_pressed = (deadman and not self._deadman_prev)
+        deadman_released = ((not deadman) and self._deadman_prev)
+        self._deadman_prev = deadman
+
         desired_pose6 = None
         cmd_pose6 = None
         cmd_gripper = None
 
-        rospy.loginfo_throttle(1.0, f"[Teleop] allow={allow} deadman={deadman} err={robot_state.err}")
-
         if allow:
-            if self._reset_pressed(inputs_st):
+            if self._reset_pressed(inputs_st) or deadman_pressed or (self._ref is None):
                 self._latch_reference(pose, robot_state)
 
-            if self._ref is None:
-                self._latch_reference(pose, robot_state)
-            else:
-                if robot_state.ee_pose is not None and len(robot_state.ee_pose) >= 6:
-                    cur6 = np.array(robot_state.ee_pose[:6], dtype=np.float32)
+            if (self._ref is not None) and (robot_state.ee_pose is not None) and (len(robot_state.ee_pose) >= 6):
+                cur6 = np.array(robot_state.ee_pose[:6], dtype=np.float32)
 
-                    desired_pose6 = self._compute_desired_pose6(pose)
-                    if desired_pose6 is not None:
-                        cmd_pose6 = self._step_toward_desired(cur6, desired_pose6)
+                desired_pose6 = self._compute_desired_pose6(pose)
+                if desired_pose6 is not None:
+                    # ---- Vive-style filtering on desired target ----
+                    desired_pose6 = self._pose_filter.apply(
+                        desired_pose6,
+                        bypass=self._reengaging,  # during re-engage, avoid EMA lag
+                    )
 
-                        # Base-coordinate servo_cart: mvvelo/mvacc/mvtime/mvradii not effective => pass zeros.
-                        # Tool-coordinate servo_cart (firmware >=1.5.0): set mvtime=1 and pose is interpreted as tool-relative.
-                        r = self.robot.move_servo_cart(
-                            pose6_mm_rpy=cmd_pose6.tolist(),
-                            tool_coord=bool(self.cfg.servo_tool_coord),
-                        )
-                        if not r.ok:
-                            rospy.logwarn_throttle(1.0, f"[teleop] move_servo_cart failed: {r.ret} {r.message}")
+                    # ---- smooth re-engagement (blend last_sent -> desired) ----
+                    if self._reengaging and (self._last_sent_pose is not None):
+                        n = int(self.cfg.reengage_steps)
+                        t = self._reengage_i / max(1, n)
+                        a = _smoothstep01(t)
+                        blended = (1.0 - a) * self._last_sent_pose + a * desired_pose6
+                        blended[3:6] = wrap_to_pi(blended[3:6])
+                        desired_pose6 = blended
+                        self._reengage_i += 1
+                        if self._reengage_i >= n:
+                            self._reengaging = False
 
+                    # ---- step-limited servo command toward desired ----
+                    cmd_pose6 = self._step_toward_desired(cur6, desired_pose6)
+
+                    r = self.robot.move_servo_cart(
+                        pose6_mm_rpy=cmd_pose6.tolist(),
+                        tool_coord=bool(self.cfg.servo_tool_coord),
+                    )
+                    if not r.ok:
+                        rospy.logwarn_throttle(1.0, f"[teleop] move_servo_cart failed: {r.ret} {r.message}")
+
+                    self._last_sent_pose = cmd_pose6.copy()
+
+            # gripper
             gp = self._compute_gripper_pulse(inputs_st)
             if gp is not None:
                 cmd_gripper = self._maybe_command_gripper(gp)
 
         else:
-            if self.cfg.clear_reference_on_deadman_release:
+            # disallowed: optionally clear reference
+            if self.cfg.clear_reference_on_deadman_release and deadman_released:
                 self._ref = None
+            # do not send new servo commands; robot holds last
 
         cams = self._nearest_cameras(stamp_sync)
 
