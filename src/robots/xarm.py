@@ -19,12 +19,12 @@ from src.configs.robot_config import (
     WAIT_FOR_FINISH_PARAM,
     GRIPPER_MIN, GRIPPER_MAX,
     HOME_JOINT, HOME_GRIPPER,
-    MODE_CART_VELO, MODE_POSITION,
+    MODE_CART_VELO, MODE_POSITION, MODE_SERVO_CART, 
     MAX_TCP_LIN_M_S, MAX_TCP_ANG_RAD_S,
     ABS_SANITY_LIN_M_S, ABS_SANITY_ANG_RAD_S,
     XArmServices,
 )
-from src.utils.robot_utils import speeds6_mps_to_xarm_units
+from src.utils.robot_utils import speeds6_mps_to_xarm_units, _wrap_to_pi
 
 
 @dataclass
@@ -49,10 +49,6 @@ def _as_call_result(res) -> CallResult:
     ret = int(getattr(res, "ret", 0))
     msg = str(getattr(res, "message", ""))
     return CallResult(ok=(ret == 0), ret=ret, message=msg)
-
-
-def _wrap_to_pi(x: np.ndarray) -> np.ndarray:
-    return (x + np.pi) % (2 * np.pi) - np.pi
 
 
 class XArmRobot:
@@ -115,14 +111,6 @@ class XArmRobot:
         self._gripper_state = rospy.ServiceProxy(self.services.gripper_state, GripperState)
         self._move_servo_cart = rospy.ServiceProxy(self.services.move_servo_cart, Move)
 
-        # Optional stop service: only if you added it to XArmServices
-        self._motion_ctrl = None
-        if hasattr(self.services, "motion_ctrl"):
-            try:
-                self._motion_ctrl = rospy.ServiceProxy(self.services.motion_ctrl, SetInt16)
-            except Exception:
-                self._motion_ctrl = None
-
         self.wait_for_state(timeout_s=10.0)
 
         if auto_init:
@@ -138,10 +126,10 @@ class XArmRobot:
             return
         self._stop_requested = True
         rospy.logwarn("[XArmRobot] Ctrl+C (SIGINT) received. Stopping waits and requesting shutdown...")
-        try:
-            self.stop_motion()
-        except Exception as e:
-            rospy.logwarn(f"[XArmRobot] stop_motion best-effort failed: {e}")
+        # try:
+        #     self.stop_motion()
+        # except Exception as e:
+        #     rospy.logwarn(f"[XArmRobot] stop_motion best-effort failed: {e}")
         try:
             rospy.signal_shutdown("SIGINT")
         except Exception:
@@ -346,6 +334,7 @@ class XArmRobot:
         return CallResult(True, 0, "mode set")
 
     # ---------------- optional stop motion ----------------
+    # TODO: check if this is needed
     def stop_motion(self) -> CallResult:
         """
         Best-effort stop via /xarm/motion_ctrl (SetInt16) if available in config.
@@ -517,40 +506,6 @@ class XArmRobot:
             self._wait_idle(timeout_s=2.0)
 
         return CallResult(True, 0, "done")
-    
-
-    def enable_servo_cart(self) -> CallResult:
-        """
-        Per xArm Servo_Cartesian doc:
-        motion_ctrl 8 1
-        set_mode 1
-        set_state 0
-        """
-        if self._motion_ctrl is None:
-            # best-effort: still set mode/state
-            r1 = self.set_mode(1)
-            if not r1.ok:
-                return r1
-            r2 = self.set_state(0)
-            return r2
-
-        # motion_ctrl 8 1 (NOTE: motion_ctrl is SetInt16; many xarm drivers interpret "8" as cmd and "1" as enable.
-        # If your motion_ctrl only accepts one int16, you may already wrap it elsewhere. If not, skip this safely.)
-        try:
-            rospy.wait_for_service(self.services.motion_ctrl, timeout=1.0)
-            req = SetInt16Request()
-            req.data = 1  # some drivers use 1 to enable; if yours needs "8 1" you likely have a different srv type.
-            self._motion_ctrl(req)
-        except Exception:
-            pass
-
-        r1 = self.set_mode(1)
-        if not r1.ok:
-            return r1
-        r2 = self.set_state(0)
-        if not r2.ok:
-            return r2
-        return CallResult(True, 0, "servo_cart enabled")
 
 
     def move_servo_cart(self, pose6_mm_rpy: List[float], tool_coord: bool = False) -> CallResult:
@@ -563,12 +518,13 @@ class XArmRobot:
         assert isinstance(pose6_mm_rpy, list) and len(pose6_mm_rpy) == 6
 
         # Servo_Cartesian runs in mode 1
-        rmode = self.ensure_mode(1, state=0)
+        rmode = self.ensure_mode(MODE_SERVO_CART, state=0)
         if not rmode.ok:
             return rmode
 
         req = MoveRequest()
         req.pose = [float(x) for x in pose6_mm_rpy]
+        # TODO: tune these values
         req.mvvelo = 100.0
         req.mvacc = 2000.0
         req.mvtime = 1.0 if tool_coord else 0.0

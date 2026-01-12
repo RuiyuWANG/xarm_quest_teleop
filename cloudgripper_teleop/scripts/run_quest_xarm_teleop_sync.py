@@ -127,9 +127,14 @@ def main():
 
     # start wrapper nodes (as rosrun)
     # assumes scripts are executable and in your package
-    stamp_quest_cmd = ["rosrun", cfg.scripts_package, "quest_stamped_node.py"]
+    stamp_quest_cmd = ["rosrun", cfg.scripts_package, "quest_stamp_node.py"]
+    stamp_robot_cmd = ["rosrun", cfg.scripts_package, "robot_state_stamp_node.py"]
 
     p = ManagedProcess("quest_stamp_node", stamp_quest_cmd, cfg.launch_workdir, cfg.pipe_launch_output)
+    p.start()
+    procs.append(p)
+
+    p = ManagedProcess("robot_state_stamp_node", stamp_robot_cmd, cfg.launch_workdir, cfg.pipe_launch_output)
     p.start()
     procs.append(p)
 
@@ -137,16 +142,18 @@ def main():
     rospy.loginfo("[startup] waiting for stamped topics/services...")
 
     if cfg.active_hand == "right":
-        pose_t = cfg.right_pose_stamped_topic
+        pose_t = cfg.right_pose_topic
+        twist_t = cfg.right_twist_stamped_topic
         inputs_t = cfg.right_inputs_stamped_topic
     else:
-        pose_t = cfg.left_pose_stamped_topic
+        pose_t = cfg.left_pose_topic
+        twist_t = cfg.left_twist_stamped_topic
         inputs_t = cfg.left_inputs_stamped_topic
 
-    must_topics = [pose_t, inputs_t]
+    must_topics = [pose_t, twist_t, inputs_t, cfg.robot_state_stamped_topic]
     for t in must_topics:
         if not wait_for_topic(t, cfg.startup_timeout_s):
-            rospy.logerr(f"[startup] missing quest topic: {t}")
+            rospy.logerr(f"[startup] missing topic: {t}")
             raise SystemExit(1)
 
     if not wait_for_topic(ROBOT_TOPIC, cfg.startup_timeout_s):

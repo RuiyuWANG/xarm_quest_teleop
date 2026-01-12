@@ -19,8 +19,28 @@
 
    pass
 
-# ROS SET-up
-1. install ROS in docker
+# ROS Set-up
+1. Docker
+   1. Start a persistent docker container with ROS1
+   ```
+   docker run -it \
+   --name ros1_noetic \
+   --network host \
+   -v ~/ros_ws:/root/ros_ws \
+   ros:noetic \
+   bash -c "apt update && apt install -y zsh && chsh -s /usr/bin/zsh && zsh"
+   ```
+
+   2. Start container
+   ```
+   sudo docker start -ai ros1_noetic
+   ```
+
+   open new shell in the running docker
+   ```
+   sudo docker exec -it ros1_noetic zsh
+   ```
+   
    source:
    ```
    source /opt/ros/noetic/setup.zsh 2>/dev/null || source /opt/ros/noetic/setup.bash
@@ -70,7 +90,7 @@
    rosservice call /xarm/gripper_move 500
    ```
 
-# Run Teleop
+# Install Teleop
 1. Warp robot and quest info to get timestamped topic for sychronization, build teleop_msgs
    ```
    cd ~/catkin_ws
@@ -78,7 +98,7 @@
    source ~/catkin_ws/devel/setup.zsh
 
    ```
-   
+
    Test 
    ```
    rosmsg show teleop_msgs/OVR2ROSInputsStamped
@@ -92,3 +112,12 @@
    catkin build cloudgripper_teleop
    source ~/catkin_ws/devel/setup.zsh
    ```
+
+
+# Run Teleop
+1. Initialize docker
+   ```
+   sudo docker start -ai ros1_noetic
+   ```
+
+   

@@ -86,7 +86,7 @@ class TeleopConfig:
     # Pose-delta teleop mapping (Quest pose -> robot target pose)
     # ==============================
     # Quest delta position is in meters; robot TCP position is in millimeters.
-    pos_scale: float = 0.3          # dimensionless multiplier on quest delta position
+    pos_scale: float = 0.35          # dimensionless multiplier on quest delta position
     rot_scale: float = 0.25         # dimensionless multiplier on quest delta rotation (axis-angle)
 
     # Map Quest delta axes into robot base/tool axes.

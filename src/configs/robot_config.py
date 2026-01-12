@@ -16,6 +16,7 @@ SRV_GO_HOME = "/xarm/go_home"
 
 SRV_MOVE_JOINT = "/xarm/move_joint"
 SRV_MOVE_LINE = "/xarm/move_line"
+SRV_MOVE_SERVO_CART = "/xarm/move_servo_cart"
 
 # TCP velocity control
 SRV_VELO_MOVE_LINE_TIMED = "/xarm/velo_move_line_timed"
@@ -23,9 +24,6 @@ SRV_VELO_MOVE_LINE_TIMED = "/xarm/velo_move_line_timed"
 # Gripper
 SRV_GRIPPER_MOVE = "/xarm/gripper_move"
 SRV_GRIPPER_STATE = "/xarm/gripper_state"
-
-# Error
-SRV_CLEAR_ERR = "/xarm/clear_err"
 
 # Mode
 MODE_POSITION = 0
@@ -35,6 +33,7 @@ MODE_JOINT_VELO = 4
 MODE_CART_VELO = 5
 MODE_JOINT_ONLINE = 6
 MODE_CART_ONLINE = 7
+MODE_SERVO_CART = 1
 
 # Default limits
 GRIPPER_MIN = -10
@@ -61,6 +60,4 @@ class XArmServices:
     velo_move_line_timed: str = SRV_VELO_MOVE_LINE_TIMED
     gripper_move: str = SRV_GRIPPER_MOVE
     gripper_state: str = SRV_GRIPPER_STATE
-    move_servo_cart: str = "/xarm/move_servo_cart"
-    motion_ctrl: str = "/xarm/motion_ctrl"
-
+    move_servo_cart: str = SRV_MOVE_SERVO_CART

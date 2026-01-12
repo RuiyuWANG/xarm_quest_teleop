@@ -1,8 +1,12 @@
 from typing import List, Tuple
 import math
+import numpy as np
 
 def _is_finite(x: float) -> bool:
     return not (math.isinf(x) or math.isnan(x))
+
+def _wrap_to_pi(x: np.ndarray) -> np.ndarray:
+    return (x + np.pi) % (2 * np.pi) - np.pi
 
 def speeds6_mps_to_xarm_units(
     speeds6_mps_rads: List[float],

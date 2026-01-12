@@ -23,7 +23,9 @@ from src.utils.teleop_utils import (
     rot_to_axis_angle,
     wrap_to_pi,
     vec_clamp_norm,
+    _smoothstep01,
     LatchedReference,
+    AdaptivePoseFilter
 )
 
 
@@ -68,71 +70,6 @@ class CameraBuffer:
         if best is None or best_dt > window:
             return None
         return best
-
-
-def _smoothstep01(t: float) -> float:
-    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
-    return t * t * (3.0 - 2.0 * t)
-
-
-class AdaptivePoseFilter:
-    """
-    Vive-style filter:
-      - clamp per-frame spikes (pos, rot)
-      - bypass EMA on big moves (no lag)
-      - EMA only for micro-jitter
-    Units:
-      - position in mm
-      - rotation in rad (RPY)
-    """
-    def __init__(
-        self,
-        ema_alpha_slow: float,
-        ema_bypass_mm: float,
-        ema_bypass_rot_rad: float,
-        clamp_mm: float,
-        clamp_rot_rad: float,
-    ):
-        self.ema_alpha_slow = float(ema_alpha_slow)
-        self.ema_bypass_mm = float(ema_bypass_mm)
-        self.ema_bypass_rot_rad = float(ema_bypass_rot_rad)
-        self.clamp_mm = float(clamp_mm)
-        self.clamp_rot_rad = float(clamp_rot_rad)
-        self._last: Optional[np.ndarray] = None  # 6
-
-    def reset(self):
-        self._last = None
-
-    def _clamp_step(self, dpos_mm: np.ndarray, drot_rad: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        # clamp by norm, separately
-        dpos_mm = vec_clamp_norm(dpos_mm.astype(np.float32), self.clamp_mm)
-        drot_rad = vec_clamp_norm(drot_rad.astype(np.float32), self.clamp_rot_rad)
-        return dpos_mm, drot_rad
-
-    def apply(self, pose6_mm_rpy: np.ndarray, bypass: bool = False) -> np.ndarray:
-        if self._last is None:
-            self._last = pose6_mm_rpy.copy()
-            return pose6_mm_rpy
-
-        d = pose6_mm_rpy - self._last
-        d[:3], d[3:6] = self._clamp_step(d[:3], wrap_to_pi(d[3:6]))
-
-        clamped = self._last + d
-        clamped[3:6] = wrap_to_pi(clamped[3:6])
-
-        pos_step = float(np.linalg.norm(d[:3]))
-        rot_step = float(np.linalg.norm(d[3:6]))
-
-        if bypass or (pos_step > self.ema_bypass_mm) or (rot_step > self.ema_bypass_rot_rad):
-            self._last = clamped
-            return clamped
-
-        a = max(0.0, min(1.0, self.ema_alpha_slow))
-        out = (1.0 - a) * self._last + a * clamped
-        out[3:6] = wrap_to_pi(out[3:6])
-        self._last = out
-        return out
-
 
 class QuestXArmTeleopSync:
     """
@@ -205,21 +142,12 @@ class QuestXArmTeleopSync:
 
         rospy.loginfo("[QuestXArmTeleopSync] ATS ready (servo_cart + fixed-rate loop)")
 
-        if cfg.servo_auto_configure:
-            self._configure_servo_cart_mode()
-
         # fixed-rate servo loop
         period = 1.0 / float(cfg.servo_rate_hz)
         self._timer = rospy.Timer(rospy.Duration(period), self._servo_tick, oneshot=False)
 
     def register_hook(self, fn: Callable[[SyncedSample], None]):
         self._hooks.append(fn)
-
-    def _configure_servo_cart_mode(self):
-        rospy.loginfo("[teleop] configuring servo_cart mode (mode=1 state=0)")
-        r = self.robot.enable_servo_cart()
-        if not r.ok:
-            rospy.logwarn(f"[teleop] enable_servo_cart failed: {r.ret} {r.message}")
 
     # ---------------- input helpers ----------------
     def _deadman(self, inputs_st: OVR2ROSInputsStamped) -> bool:
@@ -312,7 +240,7 @@ class QuestXArmTeleopSync:
         self._reengaging = True
         self._reengage_i = 0
 
-        rospy.loginfo("[teleop] reference latched (re-engage)")
+        # rospy.loginfo("[teleop] reference latched (re-engage)")
         return True
 
     def _compute_desired_pose6(self, pose: PoseStamped) -> Optional[np.ndarray]:
