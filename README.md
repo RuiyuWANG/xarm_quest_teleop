@@ -17,16 +17,22 @@
 
 3. Setup cameras.
 
-   pass
+   Connect the cameras to the PC, perferrably one to the motherboard and one to the front panel. Connect with USE 3.0 wire & port if it is necessary.
 
 # ROS Set-up
 1. Docker
-   1. Start a persistent docker container with ROS1
+   1. Start a persistent ROS1 docker container with full /dev access for USB and RealSense connection, X11 enabled for RViz
    ```
    docker run -it \
    --name ros1_noetic \
    --network host \
-   -v ~/ros_ws:/root/ros_ws \
+   --privileged \
+   -v /dev:/dev \
+   -v /run/udev:/run/udev:ro \
+   -v ~/docker_shared/catkin_ws:/root/catkin_ws \
+   -e DISPLAY=$DISPLAY \
+   -e QT_X11_NO_MITSHM=1 \
+   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
    ros:noetic \
    bash -c "apt update && apt install -y zsh && chsh -s /usr/bin/zsh && zsh"
    ```
@@ -88,7 +94,52 @@
    check gripper
    ```
    rosservice call /xarm/gripper_move 500
+
    ```
+
+4. Camera (RealSense)
+   Will need to build from source, to get a 2.55 + librealsense for D405 camera
+   ```
+   cd /root
+   git clone https://github.com/IntelRealSense/librealsense.git
+   cd librealsense
+   git checkout v2.56.3
+   mkdir -p build && cd build
+   cmake .. -DBUILD_EXAMPLES=false -DBUILD_GRAPHICAL_EXAMPLES=false
+   make -j"$(nproc)"
+   make install
+   ldconfig
+   ```
+   And ROS1 version of realsense-ros
+   ```
+   cd ~/catkin_ws/src
+   git clone https://github.com/IntelRealSense/realsense-ros.git
+   cd realsense-ros
+   git checkout noetic-development
+   ```
+   Launch camera with name to differentiate cameras, replace it with your serial numbers
+
+   ```
+   # D405
+   roslaunch realsense2_camera rs_camera.launch \
+   serial_no:=230322271104 camera:=d405
+
+   # D435i (other terminal)
+   roslaunch realsense2_camera rs_camera.launch \
+   serial_no:=335522071488 camera:=d435i
+   ```
+
+   Check serial numbers
+   ```
+   rs-enumerate-devices
+   ```
+
+   [Optional] Get RViz for visualization.
+   ```
+   apt update
+   apt install -y ros-noetic-rviz
+   ```
+
 
 # Install Teleop
 1. Warp robot and quest info to get timestamped topic for sychronization, build teleop_msgs
