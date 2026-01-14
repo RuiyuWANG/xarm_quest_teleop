@@ -28,7 +28,7 @@ from src.utils.teleop_utils import (
     AdaptivePoseFilter
 )
 
-
+# TODO: trim it down
 @dataclass
 class SyncedSample:
     stamp_ros: float
@@ -42,38 +42,9 @@ class SyncedSample:
     cmd_gripper: Optional[float]
     cameras: Dict[str, Optional[Image]]
 
-
-class CameraBuffer:
-    def __init__(self, topic: str, keep_s: float):
-        self.topic = topic
-        self.keep_s = float(keep_s)
-        self.buf: List[Image] = []
-        self.sub = rospy.Subscriber(topic, Image, self._cb, queue_size=10)
-
-    def _cb(self, msg: Image):
-        self.buf.append(msg)
-        now = msg.header.stamp.to_sec()
-        cutoff = now - self.keep_s
-        while self.buf and self.buf[0].header.stamp.to_sec() < cutoff:
-            self.buf.pop(0)
-
-    def nearest(self, t: float, window: float) -> Optional[Image]:
-        if not self.buf:
-            return None
-        best = None
-        best_dt = 1e9
-        for m in self.buf:
-            dt = abs(m.header.stamp.to_sec() - t)
-            if dt < best_dt:
-                best_dt = dt
-                best = m
-        if best is None or best_dt > window:
-            return None
-        return best
-
 class QuestXArmTeleopSync:
     """
-    Improved Servo_Cartesian teleop:
+    Servo_Cartesian teleop:
       - ATS callback only stores latest synced inputs
       - Fixed-rate timer loop (cfg.servo_rate_hz) sends /move_servo_cart
       - Vive-style adaptive filter + spike clamp + EMA bypass
@@ -99,11 +70,6 @@ class QuestXArmTeleopSync:
         self._latest_inputs: Optional[OVR2ROSInputsStamped] = None
         self._latest_robotmsg: Optional[RobotMsg] = None
         self._latest_sync_stamp: float = 0.0
-
-        # cameras
-        self._cams: Dict[str, CameraBuffer] = {
-            t: CameraBuffer(t, keep_s=cfg.camera_buffer_seconds) for t in cfg.camera_image_topics
-        }
 
         # adaptive filter on DESIRED pose (mm+rpy)
         self._pose_filter = AdaptivePoseFilter(
@@ -173,7 +139,6 @@ class QuestXArmTeleopSync:
         close_u = clamp(close_u, 0.0, 1.0)
         open_u  = clamp(open_u, 0.0, 1.0)
 
-        # close amount = press_index - press_middle
         u = clamp(open_u - close_u, -1.0, 1.0)
 
         # Incremental control around last pulse
@@ -214,13 +179,6 @@ class QuestXArmTeleopSync:
             self.quest.vibrate(hand, self.cfg.deadman_haptic_freq, self.cfg.deadman_haptic_amp)
         else:
             self.quest.vibrate(hand, 0.0, 0.0)
-
-    # ---------------- cameras ----------------
-    def _nearest_cameras(self, t_sync: float) -> Dict[str, Optional[Image]]:
-        out: Dict[str, Optional[Image]] = {}
-        for topic, buf in self._cams.items():
-            out[topic] = buf.nearest(t_sync, window=float(self.cfg.camera_match_window_s))
-        return out
 
     # ---------------- latch + mapping ----------------
     def _latch_reference(self, pose: PoseStamped, robot_state: XArmState) -> bool:
@@ -319,6 +277,7 @@ class QuestXArmTeleopSync:
             allow = False
 
         # edge detection for deadman press
+        # TODO: add the deadman release to the synced inputs
         deadman_pressed = (deadman and not self._deadman_prev)
         deadman_released = ((not deadman) and self._deadman_prev)
         self._deadman_prev = deadman
@@ -336,13 +295,13 @@ class QuestXArmTeleopSync:
 
                 desired_pose6 = self._compute_desired_pose6(pose)
                 if desired_pose6 is not None:
-                    # ---- Vive-style filtering on desired target ----
+                    # Vive-style filtering on desired target
                     desired_pose6 = self._pose_filter.apply(
                         desired_pose6,
                         bypass=self._reengaging,  # during re-engage, avoid EMA lag
                     )
 
-                    # ---- smooth re-engagement (blend last_sent -> desired) ----
+                    # smooth re-engagement (blend last_sent -> desired)
                     if self._reengaging and (self._last_sent_pose is not None):
                         n = int(self.cfg.reengage_steps)
                         t = self._reengage_i / max(1, n)
@@ -354,7 +313,7 @@ class QuestXArmTeleopSync:
                         if self._reengage_i >= n:
                             self._reengaging = False
 
-                    # ---- step-limited servo command toward desired ----
+                    # step-limited servo command toward desired
                     cmd_pose6 = self._step_toward_desired(cur6, desired_pose6)
 
                     r = self.robot.move_servo_cart(
@@ -372,13 +331,10 @@ class QuestXArmTeleopSync:
                 cmd_gripper = self._maybe_command_gripper(gp)
 
         else:
-            # disallowed: optionally clear reference
             if self.cfg.clear_reference_on_deadman_release and deadman_released:
                 self._ref = None
             # do not send new servo commands; robot holds last
-
-        cams = self._nearest_cameras(stamp_sync)
-
+            
         sample = SyncedSample(
             stamp_ros=stamp_ros,
             stamp_sync=stamp_sync,
@@ -389,7 +345,7 @@ class QuestXArmTeleopSync:
             desired_pose6_mm_rpy=desired_pose6.tolist() if desired_pose6 is not None else None,
             cmd_pose6_mm_rpy=cmd_pose6.tolist() if cmd_pose6 is not None else None,
             cmd_gripper=cmd_gripper,
-            cameras=cams,
+            cameras=None,
         )
 
         for fn in self._hooks:

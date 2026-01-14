@@ -1,0 +1,19 @@
+dataset:
+  root_dir: ../data/
+  name: stack_three_test
+  task: stack_three
+  operator: ruiyuw
+  scene: lab_table_1
+  notes: "Quest+XArm, D405+D435i"
+
+naming:
+  demo_prefix: demo_
+
+collection:
+  demo_id_start: 0        # inclusive
+  num_demos: 2           # total demos to collect
+
+random_start:
+  enabled: true
+  pos_mm_xyz: [10.0, 10.0, 5.0]      # +- mm
+  rot_rad_rpy: [0.10, 0.10, 0.10]    # +- rad

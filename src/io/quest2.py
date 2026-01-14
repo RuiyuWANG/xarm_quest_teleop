@@ -1,4 +1,3 @@
-# src/io/quest2.py
 """
 Quest2Interface for Quest2ROS messages.
 
