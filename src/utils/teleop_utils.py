@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 import numpy as np
-from typing import Optional
+from typing import Optional, Any
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
@@ -68,6 +68,17 @@ def rot_to_axis_angle(R: np.ndarray) -> np.ndarray:
     axis = axis / n
     return axis * float(angle)
 
+def _msg_stamp_sec(msg: Any) -> Optional[float]:
+    try:
+        return float(msg.header.stamp.to_sec())
+    except Exception:
+        return None
+    
+def _stamp_sec(msg: Any) -> Optional[float]:
+    try:
+        return float(msg.header.stamp.to_sec())
+    except Exception:
+        return None
 
 @dataclass
 class LatchedReference:

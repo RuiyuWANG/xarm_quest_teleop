@@ -187,10 +187,10 @@ class TeleopDataCollector:
 
         _ensure(self._demo_dir)
         _ensure(os.path.join(self._demo_dir, "frames"))
-        _ensure(os.path.join(self._demo_dir, "clouds"))
+        _ensure(os.path.join(self._demo_dir, "depth"))
 
         # random start on 'c'
-        self._random_start_move()
+        # self._random_start_move() # no longer random start
 
         self._samples.clear()
         self._frame_idx = 0
@@ -219,8 +219,6 @@ class TeleopDataCollector:
                 "name": self.ds.name,
                 "task": self.ds.task,
                 "operator": self.ds.operator,
-                "scene": self.ds.scene,
-                "notes": self.ds.notes,
             },
             "collection": {
                 "demo_id": self.current_demo_id,
@@ -251,17 +249,6 @@ class TeleopDataCollector:
         self._samples.clear()
         self._frame_idx = 0
 
-    def _cloud_xyz(self, msg: PointCloud2, stride: int) -> np.ndarray:
-        pts = []
-        i = 0
-        for p in pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True):
-            if stride > 1 and (i % stride) != 0:
-                i += 1
-                continue
-            pts.append((p[0], p[1], p[2]))
-            i += 1
-        return np.asarray(pts, dtype=np.float32)
-
     def on_sample(self, sample: SyncedSample):
         # keyboard control handling
         if self.quit_requested:
@@ -278,14 +265,8 @@ class TeleopDataCollector:
         if not self.demo_in_progress:
             return
 
-        if (time.time() - self._start_wall) > float(self.cfg.max_seconds_per_demo):
-            rospy.logwarn("[Collector] demo timeout -> finish")
-            self.finish_demo()
-            return
-
         frame_idx = self._frame_idx
 
-        # Save per-camera RGB + cloud (cloud is already chosen nearest to RGB stamp by CameraSync)
         for cam_name, cam_msgs in sample.cameras.items():
             # RGB
             if self.cfg.save_rgb_png and getattr(cam_msgs, "rgb", None) is not None:
@@ -296,14 +277,20 @@ class TeleopDataCollector:
                 if img is not None:
                     out_dir = os.path.join(self._demo_dir, "frames", cam_name)
                     _ensure(out_dir)
-                    cv2.imwrite(os.path.join(out_dir, f"{frame_idx:06d}.png"), img)
+                    cv2.imwrite(os.path.join(out_dir, f"{frame_idx:06d}_rgb.png"), img)
 
-            # Cloud
-            if self.cfg.save_cloud_pcd and getattr(cam_msgs, "cloud", None) is not None:
-                xyz = self._cloud_xyz(cam_msgs.cloud, stride=max(1, int(self.cfg.cloud_point_stride)))
-                out_dir = os.path.join(self._demo_dir, "clouds", cam_name)
-                _ensure(out_dir)
-                _write_pcd_xyz_ascii(os.path.join(out_dir, f"{frame_idx:06d}.pcd"), xyz)
+            # Depth (typically 16UC1)
+            if self.cfg.save_depth_png and getattr(cam_msgs, "depth", None) is not None:
+                try:
+                    depth = self.bridge.imgmsg_to_cv2(cam_msgs.depth, desired_encoding="passthrough")
+                except Exception:
+                    depth = None
+                if depth is not None:
+                    out_dir = os.path.join(self._demo_dir, "frames", cam_name)
+                    _ensure(out_dir)
+                    # Save raw uint16 depth in millimeters (RealSense usually publishes mm in 16UC1)
+                    cv2.imwrite(os.path.join(out_dir, f"{frame_idx:06d}_depth.png"), depth)
+
 
         # record minimal numeric core + cmd/desired
         ee6 = sample.robot_state.ee_pose[:6] if sample.robot_state.ee_pose else [np.nan] * 6

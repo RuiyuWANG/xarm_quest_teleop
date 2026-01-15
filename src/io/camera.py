@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 import rospy
-from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs.msg import Image
 
 
 @dataclass
 class SyncedCameraMsgs:
     rgb: Optional[Image]
-    cloud: Optional[PointCloud2]
+    depth: Optional[Image]
 
 
 class _Ring:
@@ -37,14 +37,21 @@ class _Ring:
 
 
 class CameraSync:
+    """
+    Multi-camera buffer with enforced RGB->Depth sync:
+
+    For each camera:
+      1) choose RGB nearest to t_sync
+      2) choose Depth nearest to RGB stamp (if RGB exists), else nearest to t_sync
+    """
     def __init__(self, cameras: Dict[str, Dict[str, str]], keep_s: float, match_window_s: float, queue_size: int):
         self.match_window_s = float(match_window_s)
         self.rgb_buf: Dict[str, _Ring] = {}
-        self.cloud_buf: Dict[str, _Ring] = {}
+        self.depth_buf: Dict[str, _Ring] = {}
 
         for name, spec in cameras.items():
             self.rgb_buf[name] = _Ring(keep_s)
-            self.cloud_buf[name] = _Ring(keep_s)
+            self.depth_buf[name] = _Ring(keep_s)
 
             rospy.Subscriber(
                 spec["rgb_topic"], Image,
@@ -52,18 +59,25 @@ class CameraSync:
                 queue_size=queue_size
             )
             rospy.Subscriber(
-                spec["cloud_topic"], PointCloud2,
-                lambda m, n=name: self.cloud_buf[n].push(m),
+                spec["depth_topic"], Image,
+                lambda m, n=name: self.depth_buf[n].push(m),
                 queue_size=queue_size
             )
 
-            rospy.loginfo(f"[CameraSync] {name} rgb={spec['rgb_topic']} cloud={spec['cloud_topic']}")
+            rospy.loginfo(f"[CameraSync] {name} rgb={spec['rgb_topic']} depth={spec['depth_topic']}")
 
     def nearest(self, t_sync: float) -> Dict[str, SyncedCameraMsgs]:
         out: Dict[str, SyncedCameraMsgs] = {}
+        w = self.match_window_s
+
         for name in self.rgb_buf.keys():
-            out[name] = SyncedCameraMsgs(
-                rgb=self.rgb_buf[name].nearest(t_sync, self.match_window_s),
-                cloud=self.cloud_buf[name].nearest(t_sync, self.match_window_s),
-            )
+            rgb = self.rgb_buf[name].nearest(t_sync, w)
+            if rgb is not None:
+                t_ref = rgb.header.stamp.to_sec()
+                depth = self.depth_buf[name].nearest(t_ref, w)
+            else:
+                depth = self.depth_buf[name].nearest(t_sync, w)
+
+            out[name] = SyncedCameraMsgs(rgb=rgb, depth=depth)
+
         return out

@@ -131,9 +131,10 @@ def main():
 
     # CameraSync + Collector
     cam_dict = {
-        k: {"rgb_topic": v.rgb_topic, "cloud_topic": v.cloud_topic}
+        k: {"rgb_topic": v.rgb_topic, "depth_topic": v.depth_topic}
         for k, v in collector_cfg.cam_sync.cameras.items()
     }
+
     cam_sync = CameraSync(
         cam_dict,
         keep_s=collector_cfg.cam_sync.keep_s,
@@ -146,6 +147,8 @@ def main():
     # Hook: very fast (attach msgs + enqueue). Heavy saving is in collector worker thread.
     def collector_hook(sample):
         sample.cameras = cam_sync.nearest(sample.stamp_sync)  # cloud chosen nearest to rgb stamp
+        # Debug lag (toggle however you like)
+        # teleop.debug_print_lags(sample, warn_ms=60.0, throttle_s=1.0)
         collector.enqueue(sample)
 
     teleop.register_hook(collector_hook)

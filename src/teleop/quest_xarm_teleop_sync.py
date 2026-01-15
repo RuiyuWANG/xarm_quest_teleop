@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import rospy
@@ -24,6 +24,8 @@ from src.utils.teleop_utils import (
     wrap_to_pi,
     vec_clamp_norm,
     _smoothstep01,
+    _msg_stamp_sec,
+    _stamp_sec,
     LatchedReference,
     AdaptivePoseFilter
 )
@@ -125,6 +127,148 @@ class QuestXArmTeleopSync:
         if not self.cfg.enable_reset:
             return False
         return bool(getattr(inputs_st.inputs, self.cfg.reset_field, False))
+    
+    # ---------------- delay helpers ----------------
+    
+    def debug_print_largest_camera_lag(
+        self,
+        sample: "SyncedSample",
+        warn_ms: float = 50.0,
+        throttle_s: float = 1.0,
+        prefix: str = "[sync]",
+    ):
+        """
+        Call this AFTER hooks attach sample.cameras.
+
+        Supports:
+        - sample.cameras is a dict: cam_name -> SyncedCameraMsgs-like object with .rgb/.depth or .rgb/.cloud
+        - cam_name -> Image message directly
+        """
+        if sample.cameras is None:
+            rospy.logwarn_throttle(throttle_s, f"{prefix} sample.cameras is None (hook hasn't attached cameras)")
+            return
+
+        t_sync = float(sample.stamp_sync)
+
+        worst: Optional[Tuple[float, str, str, float]] = None  # (abs_dt, cam, stream, msg_stamp)
+        missing = []
+
+        def consider(cam: str, stream: str, msg: Any):
+            nonlocal worst
+            ts = _msg_stamp_sec(msg)
+            if ts is None:
+                return
+            dt = abs(ts - t_sync)
+            if worst is None or dt > worst[0]:
+                worst = (dt, cam, stream, ts)
+
+        for cam, obj in sample.cameras.items():
+            if obj is None:
+                missing.append(cam)
+                continue
+
+            # SyncedCameraMsgs(rgb=?, depth=? / cloud=?)
+            if hasattr(obj, "rgb") or hasattr(obj, "depth") or hasattr(obj, "cloud"):
+                consider(cam, "rgb", getattr(obj, "rgb", None))
+                if hasattr(obj, "depth"):
+                    consider(cam, "depth", getattr(obj, "depth", None))
+                if hasattr(obj, "cloud"):
+                    consider(cam, "cloud", getattr(obj, "cloud", None))
+            else:
+                # direct Image
+                consider(cam, "image", obj)
+
+        if worst is None:
+            rospy.logwarn_throttle(throttle_s, f"{prefix} no camera stamps available")
+            return
+
+        dt, cam, stream, ts = worst
+        dt_ms = 1000.0 * dt
+
+        if dt_ms >= float(warn_ms):
+            rospy.logwarn_throttle(
+                throttle_s,
+                f"{prefix} worst camera lag = {dt_ms:.1f} ms | cam={cam} stream={stream} "
+                f"| msg_t={ts:.3f} sync_t={t_sync:.3f} | missing={missing}"
+            )
+        else:
+            rospy.loginfo_throttle(
+                throttle_s,
+                f"{prefix} worst camera lag = {dt_ms:.1f} ms | cam={cam} stream={stream}"
+            )
+            
+    def debug_print_lags(self, sample, warn_ms: float = 50.0, throttle_s: float = 1.0):
+        """
+        Call after sample.cameras is attached.
+        Prints largest camera lag vs sync time and vs robot time.
+        """
+
+        if sample.cameras is None:
+            rospy.logwarn_throttle(throttle_s, "[sync] sample.cameras is None")
+            return
+
+        t_sync = float(sample.stamp_sync)
+
+        # robot timestamp if available
+        t_robot = _stamp_sec(sample.robot_state_msg)
+        if t_robot is None:
+            # fallback: time when servo tick ran (receive-time-ish)
+            t_robot = float(sample.stamp_ros)
+
+        # compute worst camera dt relative to a reference time
+        def worst_dt(ref_t: float) -> Optional[Tuple[float, str, str, float]]:
+            worst = None  # (dt, cam, stream, msg_t)
+            def consider(cam: str, stream: str, msg: Any):
+                nonlocal worst
+                ts = _stamp_sec(msg)
+                if ts is None:
+                    return
+                dt = abs(ts - ref_t)
+                if worst is None or dt > worst[0]:
+                    worst = (dt, cam, stream, ts)
+
+            for cam, obj in sample.cameras.items():
+                if obj is None:
+                    continue
+                if hasattr(obj, "rgb") or hasattr(obj, "depth") or hasattr(obj, "cloud"):
+                    consider(cam, "rgb", getattr(obj, "rgb", None))
+                    if hasattr(obj, "depth"):
+                        consider(cam, "depth", getattr(obj, "depth", None))
+                    if hasattr(obj, "cloud"):
+                        consider(cam, "cloud", getattr(obj, "cloud", None))
+                else:
+                    consider(cam, "image", obj)
+
+            return worst
+
+        w_sync = worst_dt(t_sync)
+        w_robot = worst_dt(t_robot)
+        dt_robot_sync_ms = abs(t_robot - t_sync) * 1000.0
+
+        def fmt(w):
+            if w is None:
+                return "n/a"
+            dt, cam, stream, ts = w
+            return f"{dt*1000.0:.1f}ms (cam={cam} stream={stream} msg_t={ts:.3f})"
+
+        # decide warn condition
+        worst_ms = 0.0
+        if w_sync is not None:
+            worst_ms = max(worst_ms, w_sync[0] * 1000.0)
+        if w_robot is not None:
+            worst_ms = max(worst_ms, w_robot[0] * 1000.0)
+        worst_ms = max(worst_ms, dt_robot_sync_ms)
+
+        if worst_ms >= warn_ms:
+            rospy.logwarn_throttle(
+                throttle_s,
+                f"[sync] cam-vs-sync={fmt(w_sync)} | cam-vs-robot={fmt(w_robot)} | |robot-sync|={dt_robot_sync_ms:.1f}ms"
+            )
+        else:
+            rospy.loginfo_throttle(
+                throttle_s,
+                f"[sync] cam-vs-sync={fmt(w_sync)} | cam-vs-robot={fmt(w_robot)} | |robot-sync|={dt_robot_sync_ms:.1f}ms"
+            )
 
     # ---------------- gripper ----------------
     def _compute_gripper_pulse(self, inputs_st: OVR2ROSInputsStamped) -> Optional[float]:
