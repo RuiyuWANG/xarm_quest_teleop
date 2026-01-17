@@ -44,7 +44,6 @@ class XArmState:
     err: Optional[int]
     warn: Optional[int]
 
-
 def _as_call_result(res) -> CallResult:
     ret = int(getattr(res, "ret", 0))
     msg = str(getattr(res, "message", ""))

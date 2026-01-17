@@ -1,17 +1,17 @@
-#!/usr/bin/env python3
+# usage: python run_data_collection.py [~dataset_yaml:=test.yaml]
 import os
 import sys
 from typing import List
-
+import copy
 import rospy
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.io.quest2 import Quest2Interface
-from src.io.camera import CameraSync
-from src.io.process_manager import ManagedProcess, wait_for_topic, wait_for_service
+from src.io.camera import CamRgbDepthSync, TwoRgbSync
+from src.io.process_manager import ManagedProcess, ProcessSupervisor, wait_for_topic, wait_for_service, SampleRing
 
-from src.utils.config_utils import load_dataset_yaml
+from src.utils.config_utils import load_dataset_json
 from src.configs.teleop_config import TeleopConfig
 from src.configs.robot_config import ROBOT_TOPIC, XArmServices
 from src.configs.collector_config import CollectorConfig
@@ -25,22 +25,20 @@ def resolve_path(p: str) -> str:
     if os.path.isabs(p):
         return p
     pkg_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(pkg_root, p)
+    return os.path.join(pkg_root, "config", p)
 
 
 def main():
+    sup = ProcessSupervisor()
     rospy.init_node("teleop_data_collection", anonymous=False)
 
     teleop_cfg = TeleopConfig()
     services = XArmServices()
 
-    # dataset yaml
-    # TODO: make this configurable
-    dataset_yaml = rospy.get_param("~dataset_yaml", "config/test.yaml")
-    dataset_yaml = resolve_path(dataset_yaml)
-    ds = load_dataset_yaml(dataset_yaml)
+    dataset_json = rospy.get_param("~dataset_json", "pick_place_veggis_d1.json")
+    dataset_json = resolve_path(dataset_json)
+    ds = load_dataset_json(dataset_json)
 
-    # collector config
     collector_cfg = CollectorConfig()
 
     # Fill launch commands from TeleopConfig
@@ -50,21 +48,9 @@ def main():
     collector_cfg.launch.robot_cmd = list(teleop_cfg.ROBOT_LAUNCH_CMD)
     collector_cfg.launch.stamp_cmd = ["rosrun", teleop_cfg.scripts_package, "quest_stamped_node.py"]
 
-    # Share timing policy: camera matching window >= ATS slop and >= one servo tick
-    collector_cfg.cam_sync.match_window_s = max(
-        float(teleop_cfg.sync_slop_s),
-        1.0 / float(teleop_cfg.servo_rate_hz),
-    )
-
-    procs: List[ManagedProcess] = []
-
     def shutdown():
         rospy.logwarn("[main] shutting down, stopping launched processes")
-        for p in reversed(procs):
-            try:
-                p.stop()
-            except Exception:
-                pass
+        sup.stop_all()
 
     rospy.on_shutdown(shutdown)
 
@@ -72,25 +58,18 @@ def main():
     L = collector_cfg.launch
     if L.enabled:
         if L.auto_launch_quest and L.quest_cmd:
-            p = ManagedProcess("quest_ros_tcp_endpoint", L.quest_cmd, L.workdir, L.pipe_output)
-            p.start()
-            procs.append(p)
+            sup.start(ManagedProcess("quest_ros_tcp_endpoint", L.quest_cmd, L.workdir, L.pipe_output))
 
         if L.auto_launch_robot and L.robot_cmd:
-            p = ManagedProcess("xarm_bringup", L.robot_cmd, L.workdir, L.pipe_output)
-            p.start()
-            procs.append(p)
+            sup.start(ManagedProcess("xarm_bringup", L.robot_cmd, L.workdir, L.pipe_output))
 
         if L.auto_launch_realsense:
-            for i, cmd in enumerate(L.realsense_cmds):
-                p = ManagedProcess(f"realsense_{i}", cmd, L.workdir, L.pipe_output)
-                p.start()
-                procs.append(p)
+            cmds = L.realsense_all_launch_cmds if collector_cfg.enable_full_sync else L.realsense_light_launch_cmds
+            for i, cmd in enumerate(cmds):
+                sup.start(ManagedProcess(f"realsense_{i}", cmd, L.workdir, L.pipe_output))
 
         if L.auto_launch_stamp_node and L.stamp_cmd:
-            p = ManagedProcess("quest_stamp_node", L.stamp_cmd, L.workdir, L.pipe_output)
-            p.start()
-            procs.append(p)
+            sup.start(ManagedProcess("quest_stamp_node", L.stamp_cmd, L.workdir, L.pipe_output))
 
     # Wait readiness: quest topics, robot topic/services
     rospy.loginfo("[startup] waiting for topics/services...")
@@ -116,11 +95,24 @@ def main():
         rospy.logerr("[startup] missing services:\n  " + "\n  ".join(missing))
         raise SystemExit(1)
 
-    # Wait for camera RGB topics (cloud may appear slightly later; we don't block on it)
-    for cam_name, spec in collector_cfg.cam_sync.cameras.items():
-        if not wait_for_topic(spec.rgb_topic, teleop_cfg.startup_timeout_s):
-            rospy.logerr(f"[startup] missing camera rgb topic: {spec.rgb_topic}")
-            raise SystemExit(1)
+    # Wait for camera topics based on enabled syncs
+    assert not (not collector_cfg.enable_full_sync and not collector_cfg.enable_light_sync), \
+        "At least one camera sync must be enabled"
+
+    if collector_cfg.enable_full_sync:
+        for cam_name, spec in collector_cfg.cam_sync.cameras_all.items():
+            if not wait_for_topic(spec.rgb_topic, teleop_cfg.startup_timeout_s):
+                rospy.logerr(f"[startup] missing full camera rgb topic ({cam_name}): {spec.rgb_topic}")
+                raise SystemExit(1)
+            if not wait_for_topic(spec.depth_topic, teleop_cfg.startup_timeout_s):
+                rospy.logerr(f"[startup] missing full camera depth topic ({cam_name}): {spec.depth_topic}")
+                raise SystemExit(1)
+
+    if collector_cfg.enable_light_sync:
+        for cam_name, spec in collector_cfg.cam_sync.cameras_light.items():
+            if not wait_for_topic(spec.rgb_topic, teleop_cfg.startup_timeout_s):
+                rospy.logerr(f"[startup] missing light camera rgb topic ({cam_name}): {spec.rgb_topic}")
+                raise SystemExit(1)
 
     rospy.loginfo("[startup] ready ✅")
 
@@ -128,32 +120,79 @@ def main():
     quest = Quest2Interface(debug=False)
     robot = XArmRobot(auto_init=True, debug=False)
     teleop = QuestXArmTeleopSync(cfg=teleop_cfg, quest=quest, robot=robot)
-
-    # CameraSync + Collector
-    cam_dict = {
-        k: {"rgb_topic": v.rgb_topic, "depth_topic": v.depth_topic}
-        for k, v in collector_cfg.cam_sync.cameras.items()
-    }
-
-    cam_sync = CameraSync(
-        cam_dict,
-        keep_s=collector_cfg.cam_sync.keep_s,
-        match_window_s=collector_cfg.cam_sync.match_window_s,
-        queue_size=collector_cfg.cam_sync.queue_size,
-    )
-
     collector = TeleopDataCollector(ds, collector_cfg, robot=robot)
 
-    # Hook: very fast (attach msgs + enqueue). Heavy saving is in collector worker thread.
-    def collector_hook(sample):
-        sample.cameras = cam_sync.nearest(sample.stamp_sync)  # cloud chosen nearest to rgb stamp
-        # Debug lag (toggle however you like)
-        # teleop.debug_print_lags(sample, warn_ms=60.0, throttle_s=1.0)
-        collector.enqueue(sample)
+    # ---------------- Teleop ring ----------------
+    sample_ring = SampleRing(
+        keep_s=float(collector_cfg.robot_sync.keep_s),
+        maxlen=int(collector_cfg.robot_sync.queue_maxlen),
+    )
 
-    teleop.register_hook(collector_hook)
+    def teleop_hook(sample):
+        sample_ring.push(sample)
 
-    rospy.loginfo("[main] data collection running. Press 'c' start, 's' save, ''d' delete, 'q' quit.")
+    teleop.register_hook(teleop_hook)
+
+    # ---------------- FULL sync: 3 cams RGB+Depth ----------------
+    if collector_cfg.enable_full_sync:
+        cam_all_dict = {
+            k: {"rgb_topic": v.rgb_topic, "depth_topic": v.depth_topic}
+            for k, v in collector_cfg.cam_sync.cameras_all.items()
+        }
+
+        cam_sync3 = CamRgbDepthSync(
+            cameras=cam_all_dict,
+            pair_slop_s=float(collector_cfg.cam_sync.pair_slop_s),
+            tri_slop_s=float(collector_cfg.cam_sync.tri_slop_s),
+            pair_buf_len=int(collector_cfg.cam_sync.pair_buf_len),
+            keep_s=float(collector_cfg.cam_sync.keep_s),
+            max_wait_s=float(collector_cfg.cam_sync.max_wait_s),
+            ref_cam=str(collector_cfg.cam_sync.ref_camera),
+            sub_queue_size=int(collector_cfg.cam_sync.sub_queue_size),
+        )
+
+        def on_full_set(t_cam, cams_set):
+            t_cam = float(t_cam)
+
+            s = sample_ring.nearest(t_cam, float(collector_cfg.robot_sync.robot_match_window_s))
+            if s is None or not bool(getattr(s, "allow_control", False)):
+                return
+
+            s_full = copy.copy(s)
+            s_full.cameras = cams_set
+            s_full.stamp_sync = t_cam
+            collector.enqueue_all(s_full)
+
+        cam_sync3.on_set = on_full_set
+
+    # ---------------- LIGHT sync: 2 cams RGB only ----------------
+    if collector_cfg.enable_light_sync:
+        cam_light_dict = {
+            k: {"rgb_topic": v.rgb_topic}
+            for k, v in collector_cfg.cam_sync.cameras_light.items()
+        }
+
+        cam_rgb_sync2 = TwoRgbSync(
+            cameras=cam_light_dict,
+            slop_s=float(collector_cfg.cam_sync.rgb_slop_s),
+            queue_size=int(collector_cfg.cam_sync.rgb_queue_size),
+        )
+
+        def on_rgb2_set(t_cam, imgs):
+            t_cam = float(t_cam)
+
+            s = sample_ring.nearest(t_cam, float(collector_cfg.robot_sync.robot_match_window_s))
+            if s is None or not bool(getattr(s, "allow_control", False)):
+                return
+
+            s_light = copy.copy(s)
+            s_light.cameras = imgs
+            s_light.stamp_sync = t_cam
+            collector.enqueue_light(s_light)
+
+        cam_rgb_sync2.on_set = on_rgb2_set
+
+    rospy.loginfo("[main] data collection running. Press 'c' start, 's' save, 'd' delete, 'q' quit.")
     rospy.spin()
 
 

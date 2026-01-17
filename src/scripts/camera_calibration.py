@@ -1,3 +1,4 @@
+# usage: python camera_calibration.py [~camera_name:=d405] [~setup:=eye_to_hand]
 """
 ROS1 Charuco calibration runner (auto-launch robot + ONE selected Realsense).
 
@@ -467,12 +468,7 @@ class HandEyeCalibrator:
 
     def _calib_eye_hand(self) -> np.ndarray:
         """
-        eye_in_hand:
-          - camera on EE
-          - board fixed in base/table (your current setup)
-        Use OpenCV calibrateHandEye.
-
-        Returns EE_T_cam (4x4)
+          - board fixed in table for in-hand calibration, board holded by robot gripper for to-hand calibration
         """
         R_base_gripper = []
         t_base_gripper = []
@@ -536,7 +532,7 @@ class HandEyeCalibrator:
                 "frame": "RobotBase"
             } if self.setup == "eye_in_hand" else {
                 "X_C": None if self.base_T_cam is None else T_to_list(self.base_T_cam),
-                "frame": "EndEffector"
+                "frame": "EndEffector",
             }
         }
 
@@ -600,13 +596,13 @@ class HandEyeCalibrator:
         if base_T_EE is None:
             return img
 
-        # Predict camera_T_board:
+        # Predict cam_T_base_pose:
         # cam_T_board_pred = inv(EE_T_cam) @ inv(base_T_EE) @ base_T_board
         self.base_pose = np.eye(4)
-        cam_T_board_pred = inv_T(self.EE_T_cam) @ inv_T(base_T_EE) @ self.base_pose
+        cam_T_base_pose = inv_T(self.EE_T_cam) @ inv_T(base_T_EE) @ self.base_pose
 
-        # draw predicted board origin as red point
-        origin_cam = cam_T_board_pred[:3, 3].reshape(1, 3)
+        # draw predicted base origin as red point
+        origin_cam = cam_T_base_pose[:3, 3].reshape(1, 3)
         uv = project_points(origin_cam, K, dist)[0]
         img = draw_point(img, (uv[0], uv[1]), color=(0, 0, 255), radius=6)
         

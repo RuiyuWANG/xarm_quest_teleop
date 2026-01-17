@@ -1,7 +1,7 @@
 dataset:
   root_dir: ../data/
-  name: stack_three_test
-  task: stack_three
+  name: test_two_thread
+  task: test_two_thread
   operator: ruiyuw
   scene: lab_table_1
   notes: "Quest+XArm, D405+D435i"
@@ -11,9 +11,9 @@ naming:
 
 collection:
   demo_id_start: 0        # inclusive
-  num_demos: 2           # total demos to collect
+  num_demos: 20           # total demos to collect
 
 random_start:
-  enabled: true
+  enabled: false
   pos_mm_xyz: [10.0, 10.0, 5.0]      # +- mm
   rot_rad_rpy: [0.10, 0.10, 0.10]    # +- rad

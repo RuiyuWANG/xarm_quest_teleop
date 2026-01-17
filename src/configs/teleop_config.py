@@ -63,8 +63,8 @@ class TeleopConfig:
     clear_reference_on_deadman_release: bool = True
 
     # Pose-delta teleop mapping
-    pos_scale: float = 0.35         # multiplier on quest delta position
-    rot_scale: float = 0.25         # multiplier on quest delta rotation (axis-angle)
+    pos_scale: float = 0.40         # multiplier on quest delta position
+    rot_scale: float = 0.30         # multiplier on quest delta rotation (axis-angle)
     # Map Quest delta axes into robot base/tool axes.
     R_pos_map: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float32))   # dp_robot = R_pos_map @ dp_quest
     R_rot_map: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float32))   # daa_robot = R_rot_map @ daa_quest

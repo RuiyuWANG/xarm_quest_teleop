@@ -38,6 +38,11 @@
    ```
 
    2. Start container
+   Allow the docker access to display (IMPORTANT for visualization like rviz and rqt)
+   ```
+   xhost +local:docker
+
+   ```
    ```
    sudo docker start -ai ros1_noetic
    ```
@@ -122,11 +127,15 @@
    ```
    # D405
    roslaunch realsense2_camera rs_camera.launch \
-   serial_no:=230322271104 camera:=d405
+   serial_no:=230322271104 camera:=d405 color_width:=848 color_height:=480 color_fps:=30 align_depth:=True enable_sync:=True 
 
-   # D435i (other terminal)
+   # D435i front
    roslaunch realsense2_camera rs_camera.launch \
-   serial_no:=335522071488 camera:=d435i
+   serial_no:=335522071488 camera:=d435i color_width:=848 color_height:=480 color_fps:=30 align_depth:=True enable_sync:=True 
+
+   # D435i shoulder
+   roslaunch realsense2_camera rs_camera.launch \
+   serial_no:=233522073481 camera:=d435i color_width:=848 color_height:=480 color_fps:=30 align_depth:=True enable_sync:=True 
    ```
 
    Check serial numbers

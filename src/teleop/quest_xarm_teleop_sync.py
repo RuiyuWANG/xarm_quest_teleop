@@ -30,18 +30,15 @@ from src.utils.teleop_utils import (
     AdaptivePoseFilter
 )
 
-# TODO: trim it down
 @dataclass
 class SyncedSample:
-    stamp_ros: float
     stamp_sync: float
-    quest_pose: PoseStamped
-    quest_inputs: OVR2ROSInputsStamped
     robot_state_msg: RobotMsg
     robot_state: XArmState
     desired_pose6_mm_rpy: Optional[List[float]]
-    cmd_pose6_mm_rpy: Optional[List[float]]
     cmd_gripper: Optional[float]
+    deadman_released: bool
+    allow_control: bool
     cameras: Dict[str, Optional[Image]]
 
 class QuestXArmTeleopSync:
@@ -421,7 +418,6 @@ class QuestXArmTeleopSync:
             allow = False
 
         # edge detection for deadman press
-        # TODO: add the deadman release to the synced inputs
         deadman_pressed = (deadman and not self._deadman_prev)
         deadman_released = ((not deadman) and self._deadman_prev)
         self._deadman_prev = deadman
@@ -459,7 +455,7 @@ class QuestXArmTeleopSync:
 
                     # step-limited servo command toward desired
                     cmd_pose6 = self._step_toward_desired(cur6, desired_pose6)
-
+                   
                     r = self.robot.move_servo_cart(
                         pose6_mm_rpy=cmd_pose6.tolist(),
                         tool_coord=bool(self.cfg.servo_tool_coord),
@@ -480,15 +476,13 @@ class QuestXArmTeleopSync:
             # do not send new servo commands; robot holds last
             
         sample = SyncedSample(
-            stamp_ros=stamp_ros,
             stamp_sync=stamp_sync,
-            quest_pose=pose,
-            quest_inputs=inputs_st,
             robot_state_msg=robot_st,
             robot_state=robot_state,
-            desired_pose6_mm_rpy=desired_pose6.tolist() if desired_pose6 is not None else None,
-            cmd_pose6_mm_rpy=cmd_pose6.tolist() if cmd_pose6 is not None else None,
+            desired_pose6_mm_rpy=cmd_pose6.tolist() if cmd_pose6 is not None else None,
             cmd_gripper=cmd_gripper,
+            deadman_released=deadman_released,
+            allow_control=allow,
             cameras=None,
         )
 
