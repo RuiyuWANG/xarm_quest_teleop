@@ -21,12 +21,13 @@
 
 # ROS Set-up
 1. Docker
-   1. Start a persistent ROS1 docker container with full /dev access for USB and RealSense connection, X11 enabled for RViz
+   1. Start a persistent ROS1 docker container with full /dev access for USB and RealSense connection, X11 enabled for RViz, --gpus all to allow docker access to GPU
    ```
    docker run -it \
    --name ros1_noetic \
    --network host \
    --privileged \
+   --gpus all \
    -v /dev:/dev \
    -v /run/udev:/run/udev:ro \
    -v ~/docker_shared/catkin_ws:/root/catkin_ws \
@@ -174,10 +175,13 @@
    ```
 
 
-# Run Teleop
-1. Initialize docker
+# Run Teleop / Data collection / Policy eval
+1. Initialize docker, source
    ```
    sudo docker start -ai ros1_noetic
    ```
-
-   
+2. Start ROS core
+   ```
+   roscore
+   ```
+3. Run Scripts

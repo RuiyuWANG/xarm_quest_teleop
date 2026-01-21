@@ -79,17 +79,16 @@ def _stamp_sec(msg: Any) -> Optional[float]:
         return float(msg.header.stamp.to_sec())
     except Exception:
         return None
+    
+def _smoothstep01(t: float) -> float:
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    return t * t * (3.0 - 2.0 * t)
 
 @dataclass
 class LatchedReference:
     quest_pos_m: np.ndarray          # (3,)
     quest_rot: np.ndarray            # (3,3)
     robot_pose6_mm_rpy: np.ndarray   # (6,) [mm,mm,mm,rad,rad,rad]
-
-
-def _smoothstep01(t: float) -> float:
-    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
-    return t * t * (3.0 - 2.0 * t)
 
 class AdaptivePoseFilter:
     """

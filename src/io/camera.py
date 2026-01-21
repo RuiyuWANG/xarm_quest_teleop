@@ -237,24 +237,37 @@ class CamRgbDepthSync:
 
             # if timed out: drop silently (bounded latency)
             continue
-
 class TwoRgbSync:
     def __init__(
-        self, 
-        cameras: Dict[str, Dict[str, str]], 
-        slop_s: float, 
-        queue_size: int = 60, 
-        sub_queue_size: int = 10
+        self,
+        cameras: Dict[str, Dict[str, str]],
+        slop_s: float,
+        queue_size: int = 60,
+        sub_queue_size: int = 10,
     ):
         self.on_set = None
         self.names = list(cameras.keys())
-        subs = []
-        for name in self.names:
-            subs.append(message_filters.Subscriber(cameras[name]["rgb_topic"], Image, queue_size=sub_queue_size))
+
+        # KEEP references to subscribers on self
+        self.subs = [
+            message_filters.Subscriber(
+                cameras[name]["rgb_topic"],
+                Image,
+                queue_size=sub_queue_size
+            )
+            for name in self.names
+        ]
+
+        # KEEP reference to synchronizer on self
         self.ats = message_filters.ApproximateTimeSynchronizer(
-            subs, queue_size=queue_size, slop=slop_s, allow_headerless=False
+            self.subs,
+            queue_size=queue_size,
+            slop=slop_s,
+            allow_headerless=False,
         )
         self.ats.registerCallback(self._cb)
+
+        rospy.loginfo(f"[TwoRgbSync] subscribed to: {[cameras[n]['rgb_topic'] for n in self.names]}")
 
     def _cb(self, *imgs: Image):
         ts = [img.header.stamp.to_sec() for img in imgs]
@@ -262,3 +275,28 @@ class TwoRgbSync:
         out = {name: img for name, img in zip(self.names, imgs)}
         if self.on_set:
             self.on_set(t_ref, out)
+
+# class TwoRgbSync:
+#     def __init__(
+#         self, 
+#         cameras: Dict[str, Dict[str, str]], 
+#         slop_s: float, 
+#         queue_size: int = 60, 
+#         sub_queue_size: int = 10
+#     ):
+#         self.on_set = None
+#         self.names = list(cameras.keys())
+#         subs = []
+#         for name in self.names:
+#             subs.append(message_filters.Subscriber(cameras[name]["rgb_topic"], Image, queue_size=sub_queue_size))
+#         self.ats = message_filters.ApproximateTimeSynchronizer(
+#             subs, queue_size=queue_size, slop=slop_s, allow_headerless=False
+#         )
+#         self.ats.registerCallback(self._cb)
+
+#     def _cb(self, *imgs: Image):
+#         ts = [img.header.stamp.to_sec() for img in imgs]
+#         t_ref = sum(ts) / len(ts)
+#         out = {name: img for name, img in zip(self.names, imgs)}
+#         if self.on_set:
+#             self.on_set(t_ref, out)

@@ -425,7 +425,7 @@ class QuestXArmTeleopSync:
         desired_pose6 = None
         cmd_pose6 = None
         cmd_gripper = None
-
+        
         if allow:
             if self._reset_pressed(inputs_st) or deadman_pressed or (self._ref is None):
                 self._latch_reference(pose, robot_state)

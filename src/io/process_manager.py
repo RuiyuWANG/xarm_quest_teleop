@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import atexit
 from collections import deque
+import threading
 import os
 import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any, Deque
 
 import rospy
 
@@ -231,7 +232,7 @@ class FixedRateSelector:
             return True
         return False
 
-
+# ------------------------------- Data buffer -----------------------------------------
 class SampleRing:
     def __init__(self, keep_s: float = 1.0, maxlen: int = 2000):
         self.keep_s = float(keep_s)
@@ -257,3 +258,49 @@ class SampleRing:
         if best is None or best_dt > float(window):
             return None
         return best
+    
+@dataclass
+class ObsPacket:
+    """
+    One synchronized observation packet produced at camera-set time.
+    """
+    t_obs: float                 # ROS time in seconds
+    obs: Dict[str, Any]          # {"rgb":{cam:np.uint8 HxWx3}, "low_dim":{...}}
+    allow: bool                  # e.g., allow_control
+
+
+class TemporalObsBuffer:
+    """
+    Keeps recent ObsPackets and returns a temporal horizon [T_obs].
+    This is filled at camera-set callback rate.
+    """
+    def __init__(self, maxlen: int = 400):
+        self._lock = threading.Lock()
+        self._buf: Deque[ObsPacket] = deque(maxlen=maxlen)
+
+    def push(self, pkt: ObsPacket) -> None:
+        with self._lock:
+            self._buf.append(pkt)
+
+    def latest(self) -> Optional[ObsPacket]:
+        with self._lock:
+            return self._buf[-1] if self._buf else None
+
+    def get_horizon(self, obs_horizon: int) -> Optional[List[ObsPacket]]:
+        """
+        Returns last obs_horizon packets (pads by repeating oldest if needed).
+        """
+        with self._lock:
+            if not self._buf:
+                return None
+            items = list(self._buf)
+
+        if len(items) >= obs_horizon:
+            return items[-obs_horizon:]
+
+        pad = [items[0]] * (obs_horizon - len(items))
+        return pad + items
+    
+    def clear(self):
+        with self._lock:
+            self._buf.clear()

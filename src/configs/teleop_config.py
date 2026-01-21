@@ -14,7 +14,7 @@ class TeleopConfig:
         "roslaunch",
         "ros_tcp_endpoint",
         "endpoint.launch",
-        "tcp_ip:=192.168.0.182",
+        "tcp_ip:=192.168.0.181",
         "tcp_port:=10000",
     ])
 

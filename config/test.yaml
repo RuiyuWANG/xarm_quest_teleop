@@ -1,5 +1,5 @@
 dataset:
-  root_dir: ../data/
+  root_dir: /home/ruiyuw/Data/
   name: test_two_thread
   task: test_two_thread
   operator: ruiyuw

@@ -363,9 +363,23 @@ class XArmRobot:
             return CallResult(False, -1, str(e)), -1.0
 
     def move_gripper(self, pulse_pos: float) -> CallResult:
-        assert isinstance(pulse_pos, (int, float)) and GRIPPER_MIN <= pulse_pos <= GRIPPER_MAX
+        try:
+            pulse_pos = float(pulse_pos)
+        except Exception:
+            rospy.logwarn(f"[xArm] move_gripper: invalid pulse_pos={pulse_pos}, forcing to GRIPPER_MIN")
+            pulse_pos = GRIPPER_MIN
+
+        # cap instead of assert
+        capped = min(max(pulse_pos, GRIPPER_MIN), GRIPPER_MAX)
+        if capped != pulse_pos:
+            rospy.logwarn(
+                f"[xArm] move_gripper: pulse_pos {pulse_pos:.3f} out of range "
+                f"[{GRIPPER_MIN}, {GRIPPER_MAX}], capped to {capped:.3f}"
+            )
+        pulse_pos = capped
+
         req = GripperMoveRequest()
-        req.pulse_pos = float(pulse_pos)
+        req.pulse_pos = pulse_pos
         return self._call(self.services.gripper_move, self._gripper_move, req)
 
     # ---------------- 4) home ----------------

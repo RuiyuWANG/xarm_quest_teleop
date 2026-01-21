@@ -1,11 +1,11 @@
 {
   "dataset": {
-    "root_dir": "../data/",
+    "root_dir": "/home/ruiyuw/Data/",
     "task": "pick_place_veggies_d1",
     "robot": "xarm7",
     "gripper": "xarm_gripper",
     "description": "Pick up he purple toy eggplant and place it in the brown box.",
-    "num_demos": 50,
+    "num_demos": 60,
 
     "demo_id_start": 0,
     "demo_prefix": "episode_",

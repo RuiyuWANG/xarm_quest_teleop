@@ -114,7 +114,7 @@ class AutoLaunchConfig:
         ],
     ])
 
-# TODO: figure out the queue size the save rate, check sychronization
+# TODO: to support subtask point tracking from quest input
 @dataclass
 class CollectorConfig:
     # saving
