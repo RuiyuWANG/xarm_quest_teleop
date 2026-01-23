@@ -19,12 +19,12 @@ class EvalConfig:
     task_name: str = "real_pick_place_veggis_d1"
     model_name: str = "dp_baseline"
     record: bool = True
-    video_fps: int = 20
+    video_fps: int = 10
     record_cam: str = "d435i_front"
 
     # ---------------- observation keys ----------------
     rgb_cams_light: List[str] = field(default_factory=lambda: ["d405", "d435i_front"])
-    rgb_cams_full: List[str] = field(default_factory=lambda: ["d405", "d435i_front", "d435i_shoulder"])
+    rgb_cams_full: List[str] = field(default_factory=lambda: ["d435i_front", "d435i_shoulder"])
     lowdim_keys: List[str] = field(default_factory=lambda: ["ee_pose6", "gripper_state"])
 
     # ---------------- temporal policy spec ----------------

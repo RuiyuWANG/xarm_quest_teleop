@@ -407,7 +407,7 @@ class TeleopDataCollector:
         }
 
     def _validate_cams_all(self, cams: Any) -> bool:
-        if not isinstance(cams, dict) or len(cams) != 3:
+        if not isinstance(cams, dict):
             return False
         for _, m in cams.items():
             if getattr(m, "rgb", None) is None or getattr(m, "depth", None) is None:
@@ -449,16 +449,18 @@ class TeleopDataCollector:
         if not self.enable_full:
             return
         if not self.demo_in_progress or self._ep_all is None:
+            rospy.logwarn("[Collector] Episode all is {}, skipping sample.".format(self._ep_all))
             return
-
+        print("aaaaaaaaaaaaaa")
         lowdim = self._validate_lowdim_common(sample)
         if lowdim is None:
             return
 
         cams = getattr(sample, "cameras", None)
+        print("cams", cams)
         if not self._validate_cams_all(cams):
             return
-
+        print("bbbbbbbbbbbbbbb")
         idx = self._frame_all
         for cam_name, cam_msgs in cams.items():
             rgb_dir, depth_dir = self._ensure_cam_dirs_all(cam_name)
@@ -470,14 +472,17 @@ class TeleopDataCollector:
                     os.path.join(rgb_dir, f"{idx:06d}.png"),
                     img,
                 )
-
+            print("ddddddddddddddd")
             # Depth (always .npy for speed)
-            if self.cfg.save_depth_png and self.save_depth_npy:
+            if self.cfg.save_depth_npy:
                 depth = self.bridge.imgmsg_to_cv2(cam_msgs.depth, desired_encoding="passthrough")
                 np.save(os.path.join(depth_dir, f"{idx:06d}.npy"), depth.astype(np.uint16), allow_pickle=False)
 
+        print("ccccccccccccccc")
         self._lowdim_all.append(lowdim)
         self._frame_all += 1
+        rospy.loginfo_throttle(1.0, f"[Collector] all_sensors saving frame {self._frame_all}")
+
 
     def _on_sample_light(self, sample: SyncedSample):
         if not self.enable_light:

@@ -155,7 +155,13 @@ def main():
             t_cam = float(t_cam)
 
             s = sample_ring.nearest(t_cam, float(collector_cfg.robot_sync.robot_match_window_s))
-            if s is None or not bool(getattr(s, "allow_control", False)):
+            if s is None:
+                rospy.logwarn_throttle(
+                    2.0,
+                    f"[CamRobotSync] REF t={t_cam:.3f}: cameras has no paired robot sample within tri_slop={collector_cfg.robot_sync.robot_match_window_s}s"
+                )
+                return
+            if not bool(getattr(s, "allow_control", False)):
                 return
 
             s_full = copy.copy(s)

@@ -63,8 +63,6 @@ def main():
             sup.start(ManagedProcess("xarm_bringup", L.robot_cmd, L.workdir, L.pipe_output))
 
         if L.auto_launch_realsense:
-            # if hasattr(L, "realsense_light_launch_cmds") and cfg.enable_light_sync and not cfg.enable_full_sync:
-            #     cmds = list(L.realsense_light_launch_cmds)
             if hasattr(L, "realsense_all_launch_cmds"):
                 cmds = list(L.realsense_all_launch_cmds)
             else:
