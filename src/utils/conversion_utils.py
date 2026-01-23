@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as R, Slerp
 from typing import Any, Dict, List, Tuple, Optional, Callable
 import cv2
 import torch
 import numpy as np
 
 # --------------------------- pose6 <-> SE(3) ---------------------------
-
 def rot6d_to_R(R6: np.ndarray) -> np.ndarray:
     """
     R6: [N,6] continuous rotation representation
     Returns: [N,3,3] rotation matrices
     """
+    no_batch = len(R6.shape) == 1
+    if no_batch:
+        R6 = R6.reshape(1, -1)
+        
     a1 = R6[:, 0:3]
     a2 = R6[:, 3:6]
 
@@ -30,7 +33,21 @@ def rot6d_to_R(R6: np.ndarray) -> np.ndarray:
     b3 = np.cross(b1, b2, axis=1)
 
     Rm = np.stack([b1, b2, b3], axis=-1)  # [N,3,3]
-    return Rm
+    return Rm[0] if no_batch else Rm
+
+def R_to_rot6d(Rm: np.ndarray) -> np.ndarray:
+    """
+    Rm: (...,3,3) -> (...,6) using first two columns
+    """
+    no_batch = len(Rm.shape) == 2
+    if no_batch:
+        Rm = Rm.reshape(1, *Rm.shape)
+        
+    Rm = np.asarray(Rm, dtype=np.float32)
+    c1 = Rm[..., :, 0]
+    c2 = Rm[..., :, 1]
+    rot6 = np.concatenate([c1, c2], axis=-1).astype(np.float32)
+    return rot6[0] if no_batch else rot6
 
 def R_to_rpy_xyz(Rm: np.ndarray) -> np.ndarray:
     """
@@ -38,7 +55,6 @@ def R_to_rpy_xyz(Rm: np.ndarray) -> np.ndarray:
     Returns: [N,3] roll, pitch, yaw (xyz intrinsic, radians)
     """
     return R.from_matrix(Rm).as_euler("xyz", degrees=False)
-
 
 def rpy_to_R_xyz(rpy: np.ndarray) -> np.ndarray:
     # rpy = [roll, pitch, yaw] in rad, xyz convention
@@ -67,7 +83,6 @@ def xyz6_to_pose6(xyz6: np.ndarray) -> np.ndarray:
     rpy = R_to_rpy_xyz(Rm)
     return np.concatenate([xyz, rpy], axis=-1)
 
-
 def action_abs_to_xyz6g(tgt_pose6: np.ndarray, tgt_grip: np.ndarray) -> np.ndarray:
     """
     tgt_pose6: [T,6], tgt_grip: [T]
@@ -78,11 +93,60 @@ def action_abs_to_xyz6g(tgt_pose6: np.ndarray, tgt_grip: np.ndarray) -> np.ndarr
     g = tgt_grip.reshape(-1, 1)
     return np.concatenate([xyz6, g], axis=1)
 
+
 def xyz6g_to_action_abs(xyz6g: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     xyz6, g = xyz6g[:, :-1], xyz6g[:, -1:]
     pose6 = xyz6_to_pose6(xyz6)
     return pose6, g
 
+
+# --------------------------- SE(3) interpolation ---------------------------
+def se3_interp_xyz_rot6(a0: np.ndarray, a1: np.ndarray, n: int, grip_mode: str = "hold") -> np.ndarray:
+    """
+    Interpolate between two 10D actions in SE(3):
+      action: [x,y,z, rot6d(6), grip]
+    Returns: (n, 10) with endpoint excluded (good for streaming)
+    grip_mode: "hold" or "linear"
+    """
+    a0 = np.asarray(a0, dtype=np.float32).reshape(-1)
+    a1 = np.asarray(a1, dtype=np.float32).reshape(-1)
+    assert a0.shape[0] >= 10 and a1.shape[0] >= 10
+
+    n = int(max(1, n))
+    ts = np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
+
+    # xyz linear
+    xyz = (1.0 - ts[:, None]) * a0[0:3][None, :] + ts[:, None] * a1[0:3][None, :]
+
+    # rotation slerp
+    R0 = rot6d_to_R(a0[3:9]).reshape(3, 3)
+    R1 = rot6d_to_R(a1[3:9]).reshape(3, 3)
+    r0 = R.from_matrix(R0)
+    r1 = R.from_matrix(R1)
+
+    slerp = Slerp([0.0, 1.0], R.concatenate([r0, r1]))
+    Rts = slerp(ts).as_matrix().astype(np.float32)  # (n,3,3)
+    rot6 = R_to_rot6d(Rts)                        # (n,6)
+
+    # gripper
+    g0 = float(a0[9])
+    g1 = float(a1[9])
+    if grip_mode == "linear":
+        g = (1.0 - ts) * g0 + ts * g1
+    else:
+        # hold target grip for this segment (less chattering)
+        g = np.full((n,), g1, dtype=np.float32)
+
+    out = np.concatenate([xyz.astype(np.float32), rot6.astype(np.float32), g[:, None]], axis=1)
+    return out.astype(np.float32)
+
+
+def rotation_angle_between(Ra: np.ndarray, Rb: np.ndarray) -> float:
+    """
+    Ra, Rb: (3,3) rotation matrices -> angle in radians
+    """
+    rrel = R.from_matrix(Ra).inv() * R.from_matrix(Rb)
+    return float(rrel.magnitude())
 
 # ------------------------ image preprocessing ------------------------
 

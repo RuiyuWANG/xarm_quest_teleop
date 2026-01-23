@@ -27,10 +27,10 @@ class CameraSyncConfig:
     rgb_queue_size: int = 60
 
     cameras_all: Dict[str, RGBDCameraSpec] = field(default_factory=lambda: {
-        "d405": RGBDCameraSpec(
-            rgb_topic="/d405/color/image_raw",
-            depth_topic="/d405/aligned_depth_to_color/image_raw",
-        ),
+        # "d405": RGBDCameraSpec(
+        #     rgb_topic="/d405/color/image_raw",
+        #     depth_topic="/d405/aligned_depth_to_color/image_raw",
+        # ),
         "d435i_front": RGBDCameraSpec(
             rgb_topic="/d435i_front/color/image_raw",
             depth_topic="/d435i_front/aligned_depth_to_color/image_raw",
@@ -73,12 +73,19 @@ class AutoLaunchConfig:
 
     # List of launch commands for realsense cameras
     realsense_all_launch_cmds: List[List[str]] = field(default_factory=lambda: [
+        # ["roslaunch", "realsense2_camera", "rs_camera.launch",
+        # "serial_no:=230322271104", "camera:=d405",
+        # "enable_color:=true", "enable_depth:=true",
+        # "filters:=", 
+        # "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=True",
+        # "enable_sync:=True",
+        # ],
         ["roslaunch", "realsense2_camera", "rs_camera.launch",
         "serial_no:=230322271104", "camera:=d405",
-        "enable_color:=true", "enable_depth:=true",
+        "enable_color:=true", "enable_depth:=false",
         "filters:=", 
-        "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=True",
-        "enable_sync:=True",
+        "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=false",
+        "enable_sync:=false",
         ],
         ["roslaunch", "realsense2_camera", "rs_camera.launch",
         "serial_no:=335522071488", "camera:=d435i_front",
@@ -86,7 +93,7 @@ class AutoLaunchConfig:
         "enable_gyro:=false", "enable_accel:=false",
         "filters:=",
         "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=True",
-        "enable_sync:=True",
+        "enable_sync:=True", "initial_reset:=True",
         ],
         ["roslaunch", "realsense2_camera", "rs_camera.launch",
         "serial_no:=233522073481", "camera:=d435i_shoulder",
@@ -94,7 +101,7 @@ class AutoLaunchConfig:
         "enable_gyro:=false", "enable_accel:=false",
         "filters:=",
         "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=True",
-        "enable_sync:=True",
+        "enable_sync:=True", "initial_reset:=True",
         ],
     ])
     

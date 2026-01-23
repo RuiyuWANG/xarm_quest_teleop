@@ -166,6 +166,10 @@ class CamRgbDepthSync:
             # try to pair immediately using nearest depth
             dep = self._dep_buf[name].nearest(t, self.pair_slop_s)
             if dep is None:
+                rospy.logwarn_throttle(
+                    2.0,
+                    f"[CamRgbDepthSync] {name}: RGB @ {t:.3f} has NO matching depth within {self.pair_slop_s}s"
+                )
                 return
             # keep buffers bounded by time
             t_min = t - self.keep_s
@@ -219,6 +223,10 @@ class CamRgbDepthSync:
                     for cam_name, buf in self._pairs.items():
                         cp = buf.nearest(t_ref, self.tri_slop_s)
                         if cp is None:
+                            rospy.logwarn_throttle(
+                                2.0,
+                                f"[CamRgbDepthSync] REF t={t_ref:.3f}: camera '{cam_name}' has no pair within tri_slop={self.tri_slop_s}s"
+                            )
                             ok = False
                             break
                         tmp[cam_name] = SyncedCameraMsgs(rgb=cp.rgb, depth=cp.depth)

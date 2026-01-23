@@ -20,7 +20,7 @@ from attention_seeker.util.task_embedding import (
 )
 
 from src.policy.network_base import NetBase
-from src.utils.conversion_utils import dict_apply, pose6_to_xyz6, center_square_crop, action_abs_to_xyz6g
+from src.utils.conversion_utils import dict_apply, pose6_to_xyz6, center_square_crop
 
 default_shape_meta = {
     "obs": {

@@ -56,8 +56,10 @@ class TeleopConfig:
     # Control gating / buttons
     require_deadman: bool = True
     deadman_field: str = "button_lower"
-    enable_reset: bool = True    # Recenter reference
+    enable_reset: bool = False    # Recenter reference
     reset_field: str = "button_upper"
+    enable_subtask: bool = True  # Subtask control
+    subtask_field: str = "button_lower"  # The other hand
 
     # If True: releasing deadman clears reference; next press recenters; If False: releasing deadman pauses motion but keeps reference.
     clear_reference_on_deadman_release: bool = True
@@ -65,6 +67,7 @@ class TeleopConfig:
     # Pose-delta teleop mapping
     pos_scale: float = 0.40         # multiplier on quest delta position
     rot_scale: float = 0.30         # multiplier on quest delta rotation (axis-angle)
+    
     # Map Quest delta axes into robot base/tool axes.
     R_pos_map: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float32))   # dp_robot = R_pos_map @ dp_quest
     R_rot_map: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float32))   # daa_robot = R_rot_map @ daa_quest

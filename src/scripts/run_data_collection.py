@@ -1,4 +1,4 @@
-# usage: python run_data_collection.py [~dataset_yaml:=test.yaml]
+# usage: python run_data_collection.py [~dataset_json:=test.json]
 import os
 import sys
 from typing import List
@@ -35,7 +35,7 @@ def main():
     teleop_cfg = TeleopConfig()
     services = XArmServices()
 
-    dataset_json = rospy.get_param("~dataset_json", "pick_place_veggis_d1.json")
+    dataset_json = rospy.get_param("~dataset_json", "three_piece_toy_d2.json")
     dataset_json = resolve_path(dataset_json)
     ds = load_dataset_json(dataset_json)
 

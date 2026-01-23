@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, List
 
 import numpy as np
+import os
 import rospy
 import cv2
 from cv_bridge import CvBridge
@@ -14,9 +15,9 @@ from sensor_msgs.msg import Image
 from pynput import keyboard
 
 from src.io.process_manager import TemporalObsBuffer, ObsPacket, SampleRing
-from src.utils.conversion_utils import xyz6g_to_action_abs, pose6_to_xyz6, center_square_crop
+from src.utils.conversion_utils import xyz6g_to_action_abs, pose6_to_xyz6, center_square_crop , se3_interp_xyz_rot6, rot6d_to_R, rotation_angle_between
 from src.configs.eval_config import EvalConfig
-
+from src.io.video_recorder import AsyncVideoWriter
 
 @dataclass
 class RunState:
@@ -49,7 +50,7 @@ class EvalRunner:
         - replan each chunk from newest obs (diffusion-friendly MPC)
     """
 
-    def __init__(self, cfg: EvalConfig, robot, net, sample_ring: SampleRing, result_log_path: Optional[str] = None):
+    def __init__(self, cfg: EvalConfig, robot, net, sample_ring: SampleRing, result_log_dir: Optional[str] = None):
         self.cfg = cfg
         self.robot = robot
         self.net = net
@@ -59,9 +60,6 @@ class EvalRunner:
         self.obs_buf = TemporalObsBuffer(maxlen=1200)
 
         self.state = RunState(running=False, continue_requested=(False))  # True if gating
-        
-        # optional logging
-        self.result_log_path = result_log_path
 
         # internal
         self._stop = False
@@ -71,11 +69,43 @@ class EvalRunner:
         # planning/execution state
         self._last_grip_bin: Optional[int] = None
         self._plan_t_obs: float = 0.0
+        self._last_exec_action10: Optional[np.ndarray] = None
         
+        # logging
+        # --- logging dir ---
+        self.run_dir = os.path.join(
+            str(self.cfg.result_log_dir),
+            str(self.cfg.task_name),
+            str(self.cfg.model_name),
+            str(self.cfg.seed),
+        )
+        os.makedirs(self.run_dir, exist_ok=True)
+        if self.cfg.record:
+            self.video_dir = os.path.join(self.run_dir, "videos")
+            os.makedirs(self.video_dir, exist_ok=True)
+            
+             # --- video ---
+            self._video = AsyncVideoWriter(fps=cfg.video_fps)
+            self._cur_rollout_video_path: Optional[str] = None
+            self._recording_active = False 
+            self._cur_rollout_video_tmp_path = None
+
+        self.result_log_path = os.path.join(self.run_dir, "result.txt")
+
+        # --- resume from existing result.txt ---
+        self._load_existing_results()
+
+        # --- horizon counters (model inference steps) ---
+        self._infer_steps_in_rollout = 0
+        self._cur_rollout_status: Optional[str] = None
+
     # ---------------- lifecycle ----------------
     def start(self):
+        if int(self.state.episode_idx) < int(self.cfg.n_rollouts) and self.cfg.record:
+            self._start_rollout_video()
         self._kb_thread.start()
         self._thread.start()
+
 
     def stop(self):
         self._stop = True
@@ -107,37 +137,144 @@ class EvalRunner:
             elif ch == "s":
                 self.state.last_episode_status = "success"
                 self.state.success_count += 1
-                self._record_episode_result()
+                self._append_result(self.state.episode_idx, "success")
+                if self.cfg.record:
+                    self._finish_rollout_video("success")
+
+                self.state.episode_idx += 1
                 self.state.reset_requested = True
-                rospy.loginfo(f"[EvalRunner] marked SUCCESS (rate={self.state.success_count}/{max(1,self.state.episode_idx)})")
+
+                rospy.loginfo(f"[EvalRunner] marked SUCCESS ({self.state.success_count}/{max(1,self.state.episode_idx)})")
 
             elif ch == "f":
                 self.state.last_episode_status = "fail"
-                self._record_episode_result()
+                self._append_result(self.state.episode_idx, "fail")
+                if self.cfg.record:
+                    self._finish_rollout_video("fail")
+
+                self.state.episode_idx += 1
                 self.state.reset_requested = True
-                rospy.loginfo(f"[EvalRunner] marked FAIL (rate={self.state.success_count}/{max(1,self.state.episode_idx)})")
+
+                rospy.loginfo(f"[EvalRunner] marked FAIL ({self.state.success_count}/{max(1,self.state.episode_idx)})")
+
 
             elif ch == "q":
-                self.state.quit_requested = True
-                self.state.running = False
-                rospy.loginfo("[EvalRunner] quit requested")
+                rospy.logwarn("[EvalRunner] quit requested -> homing robot then shutting down")
+                try:
+                    self.robot.home()
+                except Exception as e:
+                    rospy.logwarn(f"[EvalRunner] home failed on quit: {e}")
+                rospy.signal_shutdown("User quit requested")
+                return
+
 
         keyboard.Listener(on_press=on_press).start()
 
         while not rospy.is_shutdown() and not self._stop and not self.state.quit_requested:
             time.sleep(0.2)
-
-    def _record_episode_result(self):
-        self.state.episode_idx += 1
-        if self.result_log_path is None:
+            
+            
+    def _load_existing_results(self):
+        self.state.episode_idx = 0
+        self.state.success_count = 0
+        if not self.result_log_path or (not os.path.exists(self.result_log_path)):
             return
         try:
-            import os
-            os.makedirs(os.path.dirname(self.result_log_path), exist_ok=True)
-            with open(self.result_log_path, "a", encoding="utf-8") as f:
-                f.write(f"{self.state.episode_idx-1}: {self.state.last_episode_status}\n")
+            with open(self.result_log_path, "r", encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+            # expected: "i: success" / "i: fail"
+            for ln in lines:
+                if ":" not in ln:
+                    continue
+                _, status = ln.split(":", 1)
+                status = status.strip().lower()
+                if status == "success":
+                    self.state.success_count += 1
+                if status in ("success", "fail"):
+                    self.state.episode_idx += 1
+            rospy.logwarn(f"[EvalRunner] resumed: episode_idx={self.state.episode_idx}, success={self.state.success_count}")
         except Exception as e:
-            rospy.logwarn(f"[EvalRunner] failed to write result log: {e}")
+            rospy.logwarn(f"[EvalRunner] failed to load results: {e}")
+
+
+    def _append_result(self, idx: int, status: str):
+        os.makedirs(os.path.dirname(self.result_log_path), exist_ok=True)
+        with open(self.result_log_path, "a", encoding="utf-8") as f:
+            f.write(f"{idx}: {status}\n")
+
+
+    def _finalize_results_file(self):
+        # create a copy named by final success rate
+        n = max(1, int(self.state.episode_idx))
+        rate = float(self.state.success_count) / float(n)
+        name = f"success_rate_{rate:.2f}.txt"
+        dst = os.path.join(self.run_dir, name)
+        try:
+            import shutil
+            shutil.copyfile(self.result_log_path, dst)
+            rospy.logwarn(f"[EvalRunner] wrote final: {dst}")
+        except Exception as e:
+            rospy.logwarn(f"[EvalRunner] failed to write final success-rate file: {e}")
+
+
+    def _start_rollout_video(self):
+        # start new video for current rollout index (status unknown yet)
+        idx = int(self.state.episode_idx)
+        self._cur_rollout_status = None
+        self._cur_rollout_video_path = os.path.join(self.video_dir, f"{idx}_pending.mp4")
+        self._video.start(self._cur_rollout_video_path)
+
+
+    def _finish_rollout_video(self, status: str):
+        # stop writer then rename pending to final name
+        idx = int(self.state.episode_idx)
+        self._video.stop()
+        if self._cur_rollout_video_path is None:
+            return
+        final_path = os.path.join(self.video_dir, f"{idx}_{status}.mp4")
+        try:
+            if os.path.exists(self._cur_rollout_video_path):
+                os.replace(self._cur_rollout_video_path, final_path)
+        except Exception as e:
+            rospy.logwarn(f"[EvalRunner] failed to rename video: {e}")
+        self._cur_rollout_video_path = None
+        self._cur_rollout_status = status
+
+            
+    # ---------------- sanity checks ----------------
+    def _in_workspace(self, xyz: np.ndarray) -> bool:
+        xyz = np.asarray(xyz, dtype=np.float32).reshape(3,)
+        mn = np.asarray(self.cfg.workspace_min_xyz, dtype=np.float32).reshape(3,)
+        mx = np.asarray(self.cfg.workspace_max_xyz, dtype=np.float32).reshape(3,)
+        return bool(np.all(xyz >= mn) and np.all(xyz <= mx))
+    
+
+    def _step_ok(self, a_prev: np.ndarray, a_next: np.ndarray) -> bool:
+        """
+        a_prev, a_next: (10,) actions [xyz,rot6,grip]
+        """
+        a_prev = np.asarray(a_prev, dtype=np.float32).reshape(-1)
+        a_next = np.asarray(a_next, dtype=np.float32).reshape(-1)
+
+        # workspace check for absolute action
+        if not self._in_workspace(a_next[0:3]):
+            rospy.logwarn_throttle(1.0, f"[EvalRunner] action out of workspace xyz={a_next[0:3]}")
+            return False
+
+        # consecutive delta check
+        dp = float(np.linalg.norm(a_next[0:3] - a_prev[0:3], ord=2))
+        Rprev = rot6d_to_R(a_prev[3:9]).reshape(3,3)
+        Rnext = rot6d_to_R(a_next[3:9]).reshape(3,3)
+        dr = rotation_angle_between(Rprev, Rnext)
+
+        if dp > float(self.cfg.max_step_trans):
+            rospy.logwarn_throttle(1.0, f"[EvalRunner] step too large dp={dp:.4f} > {self.cfg.max_step_trans}")
+            return False
+        if dr > float(self.cfg.max_step_rot_rad):
+            rospy.logwarn_throttle(1.0, f"[EvalRunner] rot step too large dr={dr:.4f} > {self.cfg.max_step_rot_rad}")
+            return False
+
+        return True
 
     # ---------------- evaluator (sync callbacks) ----------------
     def _imgmsg_to_rgb(self, msg: Image) -> Optional[np.ndarray]:
@@ -168,7 +305,6 @@ class EvalRunner:
         """
         imgs: dict cam_name -> sensor_msgs/Image
         """
-        rospy.loginfo_throttle(2.0, "[EvalRunner] on_light_rgb_set called")
         t_cam = float(t_cam)
         s = self.sample_ring.nearest(t_cam, float(self.cfg.robot_sync.robot_match_window_s))
         if s is None:
@@ -196,19 +332,19 @@ class EvalRunner:
         )
         self.obs_buf.push(pkt)
 
+    # TODO: add depth
     def on_full_rgbd_set(self, t_cam: float, cams_set: Dict[str, Any]):
         """
         Optional full sync: cams_set[cam] has .rgb and .depth
         We still only use rgb cams in cfg.rgb_cams_light for now.
         """
-        rospy.loginfo_throttle(2.0, "[EvalRunner] on_full_rgbd_set called")
         t_cam = float(t_cam)
         s = self.sample_ring.nearest(t_cam, float(self.cfg.robot_sync.robot_match_window_s))
         if s is None:
             return
         
         rgb_dict: Dict[str, np.ndarray] = {}
-        for cam in self.cfg.rgb_cams_light:
+        for cam in self.cfg.rgb_cams_full:
             cm = cams_set.get(cam, None)
             if cm is None or getattr(cm, "rgb", None) is None:
                 return
@@ -229,8 +365,10 @@ class EvalRunner:
         self.obs_buf.push(pkt)
 
     # ---------------- control loop (chunk runner) ----------------
+
     def _ros_now(self) -> float:
         return rospy.Time.now().to_sec()
+
 
     def _build_temporal_obs(self) -> Optional[Tuple[float, Dict[str, Any]]]:
         To = int(self.cfg.obs_horizon)
@@ -248,17 +386,6 @@ class EvalRunner:
         if age > float(self.cfg.obs_stale_s):
             rospy.loginfo_throttle(2.0, f"[EvalRunner] latest obs stale: age={age:.3f} > {self.cfg.obs_stale_s}")
             return None
-        
-        # To = int(self.cfg.obs_horizon)
-        # pkts = self.obs_buf.get_horizon(To)
-        # if pkts is None:
-        #     return None
-
-        # latest = pkts[-1]
-        # if not bool(latest.allow):
-        #     return None
-        # if (self._ros_now() - float(latest.t_obs)) > float(self.cfg.obs_stale_s):
-        #     return None
 
         temporal_obs = {
             "rgb": {k: [p.obs["rgb"][k] for p in pkts] for k in latest.obs["rgb"].keys()},
@@ -280,10 +407,12 @@ class EvalRunner:
         end = min(start + Te, Ta)
         return start, end
 
+
     def _pose_error(self, cur6: np.ndarray, tgt6: np.ndarray) -> Tuple[float, float]:
         dp = float(np.linalg.norm(cur6[:3] - tgt6[:3], ord=2))
         dr = float(np.linalg.norm(cur6[3:6] - tgt6[3:6], ord=2))
         return dp, dr
+
 
     def _is_step_done(self, tgt6: np.ndarray) -> bool:
         st = self.robot.get_state()
@@ -292,6 +421,7 @@ class EvalRunner:
         cur = np.asarray(st.ee_pose[:6], dtype=np.float32)
         dp, dr = self._pose_error(cur, tgt6)
         return (dp <= float(self.cfg.pos_tol_mm)) and (dr <= float(self.cfg.rot_tol_rad))
+
 
     def _convert_action_to_robot(self, act: np.ndarray) -> Tuple[np.ndarray, Optional[float]]:
         """
@@ -308,6 +438,7 @@ class EvalRunner:
         pose6 = np.asarray(pose6, dtype=np.float32).flatten()
         grip = float(grip.flatten()[0]) if grip is not None else None
         return pose6.astype(np.float32), grip
+
 
     def _send_step_command(self, pose6: np.ndarray, grip: Optional[np.ndarray]):
         self.robot.move_servo_cart(
@@ -330,6 +461,7 @@ class EvalRunner:
         else:
             self.robot.move_gripper(grip)
 
+
     def _execute_step_until_done(self, pose6: np.ndarray, grip: Optional[float]) -> bool:
         """
         Stream servo command until reached or timeout.
@@ -351,52 +483,81 @@ class EvalRunner:
             time.sleep(dt)
 
         return True
-
-    # def _execute_chunk(self, chunk_actions: np.ndarray) -> bool:
-    #     t0 = self._ros_now()
-    #     for act in chunk_actions:
-    #         if (self._ros_now() - t0) > float(self.cfg.chunk_timeout_s):
-    #             return False
-    #         if rospy.is_shutdown() or self._stop or self.state.quit_requested:
-    #             return False
-    #         if self.state.reset_requested or (not self.state.running):
-    #             return False
-
-    #         pose6, grip = self._convert_action_to_robot(act)
-    #         ok = self._execute_step_until_done(pose6, grip)
-    #         if not ok:
-    #             return False
-    #     return True
     
-    # TODO: interpolate in SE3
+    
     def _execute_chunk(self, chunk_actions: np.ndarray) -> bool:
+        """
+        chunk_actions: (Te, 10) in [xyz, rot6d, grip] predicted by policy (absolute)
+        We:
+        1) Build a smoothed action sequence in SE(3), including previous->current bridging
+        2) Sanity-check workspace + step sizes
+        3) Convert each action to robot pose6+grip and stream servo
+        """
         dt = 1.0 / float(self.cfg.control_hz)
+        N_interp = self.cfg.interp_steps
+        grip_mode = self.cfg.gripper_interp_mode
 
-        poses = []
-        grips = []
-        for act in chunk_actions:
-            pose6, grip = self._convert_action_to_robot(act)
-            poses.append(pose6)
-            grips.append(grip)
+        acts = np.asarray(chunk_actions, dtype=np.float32)
+        if acts.ndim != 2 or acts.shape[1] < 10:
+            rospy.logwarn(f"[EvalRunner] bad chunk_actions shape={acts.shape}")
+            return False
+        if acts.shape[0] == 0:
+            return True
 
-        N_interp = int(getattr(self.cfg, "interp_steps", 10))
+        # --- Build smoothed action sequence ---
+        exec_actions = []
 
-        for i in range(len(poses) - 1):
-            p0, p1 = poses[i], poses[i + 1]
-            g1 = grips[i + 1]
+        first = acts[0, :10].copy()
 
-            for a in np.linspace(0.0, 1.0, N_interp, endpoint=False):
-                if rospy.is_shutdown() or self._stop or self.state.quit_requested:
-                    return False
-                if self.state.reset_requested or (not self.state.running):
-                    return False
+        # bridge from last executed action to first action of this chunk
+        if self._last_exec_action10 is not None:
+            bridge = se3_interp_xyz_rot6(self._last_exec_action10, first, n=N_interp, grip_mode=grip_mode)
+            exec_actions.append(bridge)
 
-                p = (1 - a) * p0 + a * p1  # linear in xyz + rpy (good enough if deltas small)
-                self._send_step_command(p, g1)
-                time.sleep(dt)
+        # interpolate within chunk
+        for i in range(acts.shape[0] - 1):
+            a0 = acts[i, :10]
+            a1 = acts[i + 1, :10]
+            seg = se3_interp_xyz_rot6(a0, a1, n=N_interp, grip_mode=grip_mode)
+            exec_actions.append(seg)
 
-        self._send_step_command(poses[-1], grips[-1])
-        time.sleep(dt)
+        # include final point (one step)
+        exec_actions.append(acts[-1:, :10])
+        exec_actions = np.concatenate(exec_actions, axis=0).astype(np.float32)  # (N,10)
+
+        # --- Sanity checks ---
+        # workspace check for all
+        for j in range(exec_actions.shape[0]):
+            if not self._in_workspace(exec_actions[j, 0:3]):
+                rospy.logwarn(f"[EvalRunner] abort: action[{j}] xyz out of workspace: {exec_actions[j,0:3]}")
+                return False
+
+        # consecutive step checks (use last_exec if available)
+        prev = self._last_exec_action10 if self._last_exec_action10 is not None else exec_actions[0]
+        for j in range(exec_actions.shape[0]):
+            cur = exec_actions[j]
+            if not self._step_ok(prev, cur):
+                rospy.logwarn(f"[EvalRunner] abort: step check failed at j={j}")
+                return False
+            prev = cur
+
+        # --- Stream execution ---
+        for j in range(exec_actions.shape[0]):
+            if rospy.is_shutdown() or self._stop or self.state.quit_requested:
+                return False
+            if self.state.reset_requested or (not self.state.running):
+                return False
+
+            act10 = exec_actions[j]
+
+            # Convert 10D action to robot command (pose6 mm+rpy + grip pulse logic)
+            pose6, grip = self._convert_action_to_robot(act10)  # MAKE SURE this accepts (10,)
+            self._send_step_command(pose6, grip)
+
+            # update last executed
+            self._last_exec_action10 = act10.copy()
+
+            time.sleep(dt)
 
         return True
 
@@ -411,11 +572,17 @@ class EvalRunner:
         self.state.running = False
         self.state.continue_requested = False
         self.state.reset_requested = False
+        self._last_exec_action10 = None
+        self._infer_steps_in_rollout = 0
+
+        if int(self.state.episode_idx) < int(self.cfg.n_rollouts) and self.cfg.record:
+            self._start_rollout_video()
 
         try:
             self.robot.home()
         except Exception as e:
             rospy.logwarn(f"[EvalRunner] home_robot failed: {e}")
+
 
     def _control_loop(self):
         rate = rospy.Rate(float(self.cfg.control_hz))
@@ -426,6 +593,7 @@ class EvalRunner:
 
             if self.state.quit_requested:
                 rospy.logwarn("[EvalRunner] quit flag set -> stopping control loop")
+                rate.sleep()
                 return
 
             if self.state.reset_requested:
@@ -443,6 +611,16 @@ class EvalRunner:
                 rospy.loginfo_throttle(2.0, "[EvalRunner] waiting: continue_requested=False (press 'c')")
                 rate.sleep()
                 continue
+            
+            if int(self.state.episode_idx) >= int(self.cfg.n_rollouts):
+                rospy.logwarn("[EvalRunner] completed all rollouts -> finalizing and shutting down")
+                try:
+                    self.robot.home()
+                except Exception as e:
+                    rospy.logwarn(f"[EvalRunner] home failed at end: {e}")
+                self._finalize_results_file()
+                rospy.signal_shutdown("Finished all rollouts")
+                return
 
             built = self._build_temporal_obs()
             if built is None:
@@ -452,14 +630,37 @@ class EvalRunner:
 
             t_obs, temporal_obs = built
             self._plan_t_obs = float(t_obs)
+            
+            if self.cfg.record:
+                try:
+                    # temporal_obs["rgb"][cam] is list[T] of HWC RGB uint8 (in your EvalRunner)
+                    # take the latest frame from a preferred camera
+                    cam_pref = self.cfg.record_cam
+                    cam_keys = list(temporal_obs["rgb"].keys())
+                    cam = cam_pref if cam_pref in cam_keys else cam_keys[0]
+                    frame = temporal_obs["rgb"][cam][-1]  # HWC RGB uint8
+                    self._video.enqueue(frame)
+                except Exception:
+                    pass
 
-            rospy.loginfo_throttle(
-                1.0,
-                f"[EvalRunner] built obs at t_obs={t_obs:.3f} (now={self._ros_now():.3f})"
-            )
+            # rospy.loginfo_throttle(
+            #     1.0,
+            #     f"[EvalRunner] built obs at t_obs={t_obs:.3f} (now={self._ros_now():.3f})"
+            # )
 
             acts = self.net.infer_action(temporal_obs)
-            rospy.loginfo_throttle(1.0, "[EvalRunner] infer_action called")
+            self._infer_steps_in_rollout += 1
+
+            if int(self._infer_steps_in_rollout) >= int(self.cfg.horizon):
+                rospy.logwarn(f"[EvalRunner] rollout horizon reached ({self.cfg.horizon}) -> auto FAIL")
+                self._append_result(self.state.episode_idx, "fail")
+                if self.cfg.record:
+                    self._finish_rollout_video("fail")
+                self.state.episode_idx += 1
+                self.state.reset_requested = True
+                rate.sleep()
+                continue
+
             if acts is None:
                 rospy.logwarn_throttle(2.0, "[EvalRunner] infer_action returned None")
                 rate.sleep()

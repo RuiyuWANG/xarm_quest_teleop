@@ -132,11 +132,11 @@
 
    # D435i front
    roslaunch realsense2_camera rs_camera.launch \
-   serial_no:=335522071488 camera:=d435i color_width:=848 color_height:=480 color_fps:=30 align_depth:=True enable_sync:=True 
+   serial_no:=335522071488 camera:=d435i_front color_width:=848 color_height:=480 color_fps:=30 align_depth:=True enable_sync:=True 
 
    # D435i shoulder
    roslaunch realsense2_camera rs_camera.launch \
-   serial_no:=233522073481 camera:=d435i color_width:=848 color_height:=480 color_fps:=30 align_depth:=True enable_sync:=True 
+   serial_no:=233522073481 camera:=d435i_shoulder color_width:=848 color_height:=480 color_fps:=30 align_depth:=True enable_sync:=True 
    ```
 
    Check serial numbers

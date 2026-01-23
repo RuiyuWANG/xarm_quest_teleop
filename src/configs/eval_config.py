@@ -9,28 +9,38 @@ from src.configs.collector_config import RGBDCameraSpec, RGBCameraSpec, CameraSy
 
 @dataclass
 class EvalConfig:
-    """
-    All evaluation knobs in one place.
-    """
-
     # ---------------- model ----------------
     model_ckpt_path: str = "/root/catkin_ws/src/experiment/demos-50_agentview-pass_through_eye_in_hand-pass_through_seed-0/checkpoints/latest.ckpt"
-    result_log_path: str = "../evaluation/test_pick_and_place.txt"
+    result_log_dir: str = "../evaluation/"
     device: str = "cuda"  # "cuda" | "cpu"
-    seed: int = 0    
+    seed: int = 0
+    n_rollouts: int = 20
+    horizon: int = 400
+    task_name: str = "real_pick_place_veggis_d1"
+    model_name: str = "dp_baseline"
+    record: bool = True
+    video_fps: int = 20
+    record_cam: str = "d435i_front"
 
     # ---------------- observation keys ----------------
     rgb_cams_light: List[str] = field(default_factory=lambda: ["d405", "d435i_front"])
+    rgb_cams_full: List[str] = field(default_factory=lambda: ["d405", "d435i_front", "d435i_shoulder"])
     lowdim_keys: List[str] = field(default_factory=lambda: ["ee_pose6", "gripper_state"])
 
     # ---------------- temporal policy spec ----------------
-    # You will later load these from model config; keep them here now.
     obs_horizon: int = 1     # To
     pred_horizon: int = 8    # Ta
     exec_horizon: int = 4    # Te (1..Ta)
     dt_ctrl: float = 1.0 / 30.0
     use_delay_comp: bool = True
+    
+    # ---------------- smooth interpolation ----------------
     interp_steps: int = 10
+    gripper_interp_mode: str = "hold" # "hold" | "linear"
+    max_step_trans: float = 10.0  # mm
+    max_step_rot_rad: float = 0.15  # rad
+    workspace_min_xyz: List[float] = (50.0, -200.0, 0.0)  # mm
+    workspace_max_xyz: List[float] = (500.0, 200.0, 400.0)  # mm
 
     # ---------------- execution spec ----------------
     control_hz: float = 30.0
@@ -43,24 +53,22 @@ class EvalConfig:
 
     servo_tool_coord: bool = False
 
-    # model output units (xyz)
-    xyz_unit: str = "mm"
+    xyz_unit: str = "mm"   # model output units (xyz) | "mm" | "m"
     
-    # gripper mapping
-    gripper_binary: bool = False
+    gripper_binary: bool = False    # True if gripper prediction is binary
     gripper_open_pulse: float = 850.0
     gripper_close_pulse: float = 100.0
     gripper_deadband: float = 0.5
 
     # ---------------- sync ----------------
-    enable_light_sync: bool = False
-    enable_full_sync: bool = True   # optional: if you also want 3 cams + depth later
+    enable_light_sync: bool = True
+    enable_full_sync: bool = False
 
-    # keep same as your collector configs, reuse your existing dataclasses
+    # ---------------- launch ----------------
     cam_sync: CameraSyncConfig = field(default_factory=CameraSyncConfig)
     robot_sync: RobotSyncConfig = field(default_factory=RobotSyncConfig)
     launch: AutoLaunchConfig = field(default_factory=AutoLaunchConfig)
 
-    # ---------------- optional quest ----------------
+    # ---------------- quest ----------------
     launch_quest: bool = False
     quest_cmd: Optional[List[str]] = None

@@ -39,6 +39,7 @@ class SyncedSample:
     cmd_gripper: Optional[float]
     deadman_released: bool
     allow_control: bool
+    subtask_end: bool
     cameras: Dict[str, Optional[Image]]
 
 class QuestXArmTeleopSync:
@@ -67,6 +68,7 @@ class QuestXArmTeleopSync:
         # latest synced messages (from ATS)
         self._latest_pose: Optional[PoseStamped] = None
         self._latest_inputs: Optional[OVR2ROSInputsStamped] = None
+        self._latest_inputs_rest: Optional[OVR2ROSInputsStamped] = None
         self._latest_robotmsg: Optional[RobotMsg] = None
         self._latest_sync_stamp: float = 0.0
 
@@ -88,17 +90,20 @@ class QuestXArmTeleopSync:
         if cfg.active_hand == "right":
             pose_topic = cfg.right_pose_stamped_topic
             inputs_topic = cfg.right_inputs_stamped_topic
+            input_topic_rest = cfg.left_inputs_stamped_topic
         else:
             pose_topic = cfg.left_pose_stamped_topic
             inputs_topic = cfg.left_inputs_stamped_topic
+            input_topic_rest = cfg.right_inputs_stamped_topic
 
         # ATS subs
         self.pose_sub = message_filters.Subscriber(pose_topic, PoseStamped)
         self.inputs_sub = message_filters.Subscriber(inputs_topic, OVR2ROSInputsStamped)
+        self.inputs_sub_rest = message_filters.Subscriber(input_topic_rest, OVR2ROSInputsStamped)
         self.robot_sub = message_filters.Subscriber(cfg.robot_state, RobotMsg)
 
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.pose_sub, self.inputs_sub, self.robot_sub],
+            [self.pose_sub, self.inputs_sub, self.inputs_sub_rest, self.robot_sub],
             queue_size=int(cfg.sync_queue_size),
             slop=float(cfg.sync_slop_s),
             allow_headerless=bool(cfg.sync_allow_headerless),
@@ -124,6 +129,11 @@ class QuestXArmTeleopSync:
         if not self.cfg.enable_reset:
             return False
         return bool(getattr(inputs_st.inputs, self.cfg.reset_field, False))
+    
+    def _subtask_pressed(self, inputs_st: OVR2ROSInputsStamped) -> bool:
+        if not self.cfg.enable_subtask:
+            return False
+        return bool(getattr(inputs_st.inputs, self.cfg.subtask_field, False))
     
     # ---------------- delay helpers ----------------
     
@@ -387,9 +397,10 @@ class QuestXArmTeleopSync:
         return cmd
 
     # ---------------- ATS callback (store latest only) ----------------
-    def _ats_cb(self, pose: PoseStamped, inputs_st: OVR2ROSInputsStamped, robot_st: RobotMsg):
+    def _ats_cb(self, pose: PoseStamped, inputs_st: OVR2ROSInputsStamped, inputs_st_rest: OVR2ROSInputsStamped, robot_st: RobotMsg):
         self._latest_pose = pose
         self._latest_inputs = inputs_st
+        self._latest_inputs_rest = inputs_st_rest
         self._latest_robotmsg = robot_st
         self._latest_sync_stamp = pose.header.stamp.to_sec()
 
@@ -400,6 +411,7 @@ class QuestXArmTeleopSync:
 
         pose = self._latest_pose
         inputs_st = self._latest_inputs
+        inputs_st_rest = self._latest_inputs_rest
         robot_st = self._latest_robotmsg
 
         if pose is None or inputs_st is None or robot_st is None:
@@ -421,7 +433,9 @@ class QuestXArmTeleopSync:
         deadman_pressed = (deadman and not self._deadman_prev)
         deadman_released = ((not deadman) and self._deadman_prev)
         self._deadman_prev = deadman
-
+        
+        subtask_pressed = self._subtask_pressed(inputs_st_rest)
+        
         desired_pose6 = None
         cmd_pose6 = None
         cmd_gripper = None
@@ -483,6 +497,7 @@ class QuestXArmTeleopSync:
             cmd_gripper=cmd_gripper,
             deadman_released=deadman_released,
             allow_control=allow,
+            subtask_end=subtask_pressed,
             cameras=None,
         )
 

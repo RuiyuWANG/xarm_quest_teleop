@@ -13,7 +13,7 @@ import rospy
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.io.camera import TwoRgbSync, CamRgbDepthSync
-from src.io.process_manager import ManagedProcess, wait_for_topic, wait_for_service, SampleRing
+from src.io.process_manager import ManagedProcess, wait_for_topic, wait_for_service, SampleRing, ProcessSupervisor
 from src.configs.teleop_config import TeleopConfig
 from src.configs.eval_config import EvalConfig
 from src.configs.robot_config import ROBOT_TOPIC, XArmServices
@@ -27,6 +27,7 @@ from src.eval.eval_runner import EvalRunner
 
 
 def main():
+    sup = ProcessSupervisor()
     rospy.init_node("policy_eval", anonymous=False)
 
     teleop_cfg = TeleopConfig()
@@ -36,7 +37,7 @@ def main():
     cfg.model_ckpt_path = rospy.get_param("~model_ckpt", cfg.model_ckpt_path)
     cfg.launch_quest = bool(rospy.get_param("~launch_quest", cfg.launch_quest))
     cfg.seed = int(rospy.get_param("~seed", cfg.seed))
-    cfg.result_log_path = rospy.get_param("~result_log_path", cfg.result_log_path)
+    cfg.result_log_dir = rospy.get_param("~result_log_dir", cfg.result_log_dir)
 
     # launch commands
     cfg.launch.workdir = teleop_cfg.launch_workdir
@@ -46,15 +47,9 @@ def main():
     if cfg.launch_quest:
         cfg.launch.quest_cmd = list(teleop_cfg.QUEST_LAUNCH_CMD)
 
-    procs: List[ManagedProcess] = []
-
     def shutdown():
-        rospy.logwarn("[eval main] shutting down, stopping launched processes")
-        for p in reversed(procs):
-            try:
-                p.stop()
-            except Exception:
-                pass
+        rospy.logwarn("[main] shutting down, stopping launched processes")
+        sup.stop_all()
 
     rospy.on_shutdown(shutdown)
 
@@ -62,32 +57,24 @@ def main():
     L = cfg.launch
     if L.enabled:
         if cfg.launch_quest and L.auto_launch_quest and L.quest_cmd:
-            p = ManagedProcess("quest_ros_tcp_endpoint", L.quest_cmd, L.workdir, L.pipe_output)
-            p.start()
-            procs.append(p)
+            sup.start(ManagedProcess("quest_ros_tcp_endpoint", L.quest_cmd, L.workdir, L.pipe_output))
 
         if L.auto_launch_robot and L.robot_cmd:
-            p = ManagedProcess("xarm_bringup", L.robot_cmd, L.workdir, L.pipe_output)
-            p.start()
-            procs.append(p)
+            sup.start(ManagedProcess("xarm_bringup", L.robot_cmd, L.workdir, L.pipe_output))
 
         if L.auto_launch_realsense:
-            if hasattr(L, "realsense_light_launch_cmds") and cfg.enable_light_sync and not cfg.enable_full_sync:
-                cmds = list(L.realsense_light_launch_cmds)
-            elif hasattr(L, "realsense_all_launch_cmds") and cfg.enable_full_sync:
+            # if hasattr(L, "realsense_light_launch_cmds") and cfg.enable_light_sync and not cfg.enable_full_sync:
+            #     cmds = list(L.realsense_light_launch_cmds)
+            if hasattr(L, "realsense_all_launch_cmds"):
                 cmds = list(L.realsense_all_launch_cmds)
             else:
                 cmds = list(getattr(L, "realsense_cmds", []))
 
             for i, cmd in enumerate(cmds):
-                p = ManagedProcess(f"realsense_{i}", cmd, L.workdir, L.pipe_output)
-                p.start()
-                procs.append(p)
+                sup.start(ManagedProcess(f"realsense_{i}", cmd, L.workdir, L.pipe_output))
 
         if cfg.launch_quest and L.auto_launch_stamp_node and L.stamp_cmd:
-            p = ManagedProcess("quest_stamp_node", L.stamp_cmd, L.workdir, L.pipe_output)
-            p.start()
-            procs.append(p)
+            sup.start(ManagedProcess("quest_stamp_node", L.stamp_cmd, L.workdir, L.pipe_output))
 
     # ---- wait robot ----
     rospy.loginfo("[eval startup] waiting for robot topic/services...")
@@ -165,7 +152,7 @@ def main():
         seed=cfg.seed,
     )
 
-    runner = EvalRunner(cfg=cfg, robot=robot, net=net, sample_ring=sample_ring, result_log_path=cfg.result_log_path)
+    runner = EvalRunner(cfg=cfg, robot=robot, net=net, sample_ring=sample_ring, result_log_dir=cfg.result_log_dir)
     runner.start()
 
     # ---- sync wiring ----
@@ -176,20 +163,7 @@ def main():
             slop_s=float(cfg.cam_sync.rgb_slop_s),
             queue_size=int(cfg.cam_sync.rgb_queue_size),
         )
-
-        cam_names = list(cam_light_dict.keys())
-
-        def on_rgb2_set(t_cam, imgs):
-            # normalize TwoRgbSync output to real names
-            out = {}
-            if "cam0" in imgs and "cam1" in imgs and len(cam_names) == 2:
-                out[cam_names[0]] = imgs["cam0"]
-                out[cam_names[1]] = imgs["cam1"]
-            else:
-                out = imgs
-            runner.on_light_rgb_set(float(t_cam), out)
-
-        rgb2.on_set = on_rgb2_set
+        rgb2.on_set = runner.on_light_rgb_set
 
     if cfg.enable_full_sync:
         cam_all_dict = {k: {"rgb_topic": v.rgb_topic, "depth_topic": v.depth_topic} for k, v in cfg.cam_sync.cameras_all.items()}
