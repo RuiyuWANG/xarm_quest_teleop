@@ -4,6 +4,7 @@ import sys
 from typing import List
 import copy
 import rospy
+import threading  # <-- NEW
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -35,11 +36,26 @@ def main():
     teleop_cfg = TeleopConfig()
     services = XArmServices()
 
-    dataset_json = rospy.get_param("~dataset_json", "three_piece_toy_d2.json")
+    dataset_json = rospy.get_param("~dataset_json", "three_piece_toy_d1.json")
     dataset_json = resolve_path(dataset_json)
     ds = load_dataset_json(dataset_json)
 
     collector_cfg = CollectorConfig()
+
+    # ---------------- NEW: fixed-rate collection settings from dataset config ----------------
+    collect_hz = ds.collection_freq_hz
+    if collect_hz is None:
+        raise ValueError(f"Dataset '{dataset_json}' has no collection frequency. Please set it manually.")
+    else:
+        collect_hz = float(collect_hz)
+    
+    collect_period = 1.0 / collect_hz
+    lock = threading.Lock()
+    latest_full = {"t": None, "cams": None}
+    latest_light = {"t": None, "imgs": None}
+    last_enqueued_t_cam = {"full": None, "light": None}
+
+    # ----------------------------------------------------------------------------------------
 
     # Fill launch commands from TeleopConfig
     collector_cfg.launch.workdir = teleop_cfg.launch_workdir
@@ -151,23 +167,11 @@ def main():
             sub_queue_size=int(collector_cfg.cam_sync.sub_queue_size),
         )
 
+        # NEW: callback only caches latest synced set (no enqueue here)
         def on_full_set(t_cam, cams_set):
-            t_cam = float(t_cam)
-
-            s = sample_ring.nearest(t_cam, float(collector_cfg.robot_sync.robot_match_window_s))
-            if s is None:
-                rospy.logwarn_throttle(
-                    2.0,
-                    f"[CamRobotSync] REF t={t_cam:.3f}: cameras has no paired robot sample within tri_slop={collector_cfg.robot_sync.robot_match_window_s}s"
-                )
-                return
-            if not bool(getattr(s, "allow_control", False)):
-                return
-
-            s_full = copy.copy(s)
-            s_full.cameras = cams_set
-            s_full.stamp_sync = t_cam
-            collector.enqueue_all(s_full)
+            with lock:
+                latest_full["t"] = float(t_cam)
+                latest_full["cams"] = cams_set
 
         cam_sync3.on_set = on_full_set
 
@@ -184,19 +188,52 @@ def main():
             queue_size=int(collector_cfg.cam_sync.rgb_queue_size),
         )
 
+        # NEW: callback only caches latest synced set (no enqueue here)
         def on_rgb2_set(t_cam, imgs):
-            t_cam = float(t_cam)
-
-            s = sample_ring.nearest(t_cam, float(collector_cfg.robot_sync.robot_match_window_s))
-            if s is None or not bool(getattr(s, "allow_control", False)):
-                return
-
-            s_light = copy.copy(s)
-            s_light.cameras = imgs
-            s_light.stamp_sync = t_cam
-            collector.enqueue_light(s_light)
+            with lock:
+                latest_light["t"] = float(t_cam)
+                latest_light["imgs"] = imgs
 
         cam_rgb_sync2.on_set = on_rgb2_set
+
+    # ---------------- NEW: fixed-rate enqueue loop ----------------
+    def collect_tick(_evt):
+        now = rospy.Time.now().to_sec()
+
+        use_full = bool(collector_cfg.enable_full_sync)
+        use_light = bool(collector_cfg.enable_light_sync)
+
+        with lock:
+            t_full = latest_full["t"]
+            cams_full = latest_full["cams"]
+            t_light = latest_light["t"]
+            imgs_light = latest_light["imgs"]
+
+        # ---- FULL ----
+        if use_full and t_full is not None and cams_full is not None:
+            if last_enqueued_t_cam["full"] is None or abs(float(t_full) - float(last_enqueued_t_cam["full"])) >= 1e-9:
+                s = sample_ring.nearest(float(t_full), float(collector_cfg.robot_sync.robot_match_window_s))
+                if s is not None and bool(getattr(s, "allow_control", False)):
+                    s_out = copy.copy(s)
+                    s_out.cameras = cams_full
+                    s_out.stamp_sync = float(t_full)
+                    collector.enqueue_all(s_out)
+                    last_enqueued_t_cam["full"] = float(t_full)
+
+        # ---- LIGHT ----
+        if use_light and t_light is not None and imgs_light is not None:
+            if last_enqueued_t_cam["light"] is None or abs(float(t_light) - float(last_enqueued_t_cam["light"])) >= 1e-9:
+                s = sample_ring.nearest(float(t_light), float(collector_cfg.robot_sync.robot_match_window_s))
+                if s is not None and bool(getattr(s, "allow_control", False)):
+                    s_out = copy.copy(s)
+                    s_out.cameras = imgs_light
+                    s_out.stamp_sync = float(t_light)
+                    collector.enqueue_light(s_out)
+                    last_enqueued_t_cam["light"] = float(t_light)
+
+    rospy.Timer(rospy.Duration(collect_period), collect_tick)
+    rospy.loginfo(f"[main] fixed-rate collection enabled: {collect_hz:.3f} Hz (period={collect_period:.3f}s)")
+    # ------------------------------------------------------------
 
     rospy.loginfo("[main] data collection running. Press 'c' start, 's' save, 'd' delete, 'q' quit.")
     rospy.spin()

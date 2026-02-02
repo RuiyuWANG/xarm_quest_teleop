@@ -306,17 +306,26 @@ class QuestXArmTeleopSync:
 
     def _maybe_command_gripper(self, pulse: float) -> Optional[float]:
         now = time.time()
+        _, current_gpos = self.robot.get_gripper_state()
+        
+        # Rate limit
         if now - self._last_grip_cmd_time < float(self.cfg.grip_rate_limit_s):
-            return None
+            return current_gpos  # return current gpos
+
+        # Change threshold
         if (not self.cfg.grip_continuous) and (self._last_grip_pulse is not None):
             if abs(pulse - self._last_grip_pulse) < float(self.cfg.grip_change_eps):
-                return None
+                return current_gpos  # return current gpos
+
         r = self.robot.move_gripper(pulse)
         if r.ok:
             self._last_grip_cmd_time = now
             self._last_grip_pulse = pulse
             return pulse
-        return None
+
+        # Command failed → return current gpos
+        return current_gpos
+
 
     # ---------------- haptics ----------------
     def _haptics(self, deadman: bool, robot_state: XArmState):
@@ -369,7 +378,7 @@ class QuestXArmTeleopSync:
         # map + scale into robot space
         dp_robot_m = (self.cfg.R_pos_map @ dp_m) * float(self.cfg.pos_scale)
         daa_robot = (self.cfg.R_rot_map @ daa) * float(self.cfg.rot_scale)
-
+        
         # clamp absolute delta (safety)
         dp_robot_m = vec_clamp_norm(dp_robot_m.astype(np.float32), float(self.cfg.max_delta_pos_m))
         daa_robot = vec_clamp_norm(daa_robot.astype(np.float32), float(self.cfg.max_delta_rot_rad))
@@ -466,6 +475,9 @@ class QuestXArmTeleopSync:
                         self._reengage_i += 1
                         if self._reengage_i >= n:
                             self._reengaging = False
+                            
+                    # HACK, disable roll
+                    desired_pose6[-3] = np.pi
 
                     # step-limited servo command toward desired
                     cmd_pose6 = self._step_toward_desired(cur6, desired_pose6)
@@ -482,6 +494,7 @@ class QuestXArmTeleopSync:
             # gripper
             gp = self._compute_gripper_pulse(inputs_st)
             if gp is not None:
+                # Note: gripper command is continuous 
                 cmd_gripper = self._maybe_command_gripper(gp)
 
         else:

@@ -16,6 +16,7 @@ class DatasetInfo:
     gripper: str
     description: str
     num_demos: int
+    collection_freq_hz: float
 
     demo_id_start: int = 0
     demo_prefix: str = "episode_"
@@ -46,6 +47,7 @@ class DatasetInfo:
                 "random_start": bool(self.random_start),
                 "operator": self.operator,
                 "notes": self.notes,
+                "collection_freq_hz": float(self.collection_freq_hz),
             },
             "calibration": self.calibration if self.calibration is not None else {},
         }
@@ -89,6 +91,7 @@ def load_dataset_json(path: str) -> DatasetInfo:
         random_start=bool(ds.get("random_start", False)),
         operator=str(ds.get("operator", "")),
         notes=str(ds.get("notes", "")),
+        collection_freq_hz=float(ds.get("collection_freq_hz", None)),
         calibration=cal,
     )
 

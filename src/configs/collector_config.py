@@ -87,7 +87,7 @@ class AutoLaunchConfig:
         "filters:=",
         "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=false",
         "depth_width:=848", "depth_height:=480", "depth_fps:=30"
-        "enable_sync:=false", 
+        "enable_sync:=false", "initial_reset:=true",
         ],
         ["roslaunch", "realsense2_camera", "rs_camera.launch",
         "serial_no:=233522073481", "camera:=d435i_shoulder",
@@ -95,7 +95,7 @@ class AutoLaunchConfig:
         "filters:=",
         "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=false",
         "depth_width:=848", "depth_height:=480", "depth_fps:=30"
-        "enable_sync:=false", 
+        "enable_sync:=false", "initial_reset:=true",
         ],
     ])
     
@@ -124,6 +124,8 @@ class CollectorConfig:
     enable_full_sync: bool = True
     enable_light_sync: bool = True
     max_queue: int = 200
+    disable_gripper: bool = False
+    fixed_gripper: float = 0.0
     
     # keyboard
     start_key: str = "c"

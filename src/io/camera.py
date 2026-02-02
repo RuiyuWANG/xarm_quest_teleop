@@ -283,28 +283,5 @@ class TwoRgbSync:
         out = {name: img for name, img in zip(self.names, imgs)}
         if self.on_set:
             self.on_set(t_ref, out)
-
-# class TwoRgbSync:
-#     def __init__(
-#         self, 
-#         cameras: Dict[str, Dict[str, str]], 
-#         slop_s: float, 
-#         queue_size: int = 60, 
-#         sub_queue_size: int = 10
-#     ):
-#         self.on_set = None
-#         self.names = list(cameras.keys())
-#         subs = []
-#         for name in self.names:
-#             subs.append(message_filters.Subscriber(cameras[name]["rgb_topic"], Image, queue_size=sub_queue_size))
-#         self.ats = message_filters.ApproximateTimeSynchronizer(
-#             subs, queue_size=queue_size, slop=slop_s, allow_headerless=False
-#         )
-#         self.ats.registerCallback(self._cb)
-
-#     def _cb(self, *imgs: Image):
-#         ts = [img.header.stamp.to_sec() for img in imgs]
-#         t_ref = sum(ts) / len(ts)
-#         out = {name: img for name, img in zip(self.names, imgs)}
-#         if self.on_set:
-#             self.on_set(t_ref, out)
+        if out is None:
+            rospy.logwarn_throttle(2.0, f"[TwoRgbSync] t={t_ref:.3f}: no image pairs")

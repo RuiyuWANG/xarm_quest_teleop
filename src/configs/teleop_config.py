@@ -71,9 +71,10 @@ class TeleopConfig:
     # Map Quest delta axes into robot base/tool axes.
     R_pos_map: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float32))   # dp_robot = R_pos_map @ dp_quest
     R_rot_map: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float32))   # daa_robot = R_rot_map @ daa_quest
-
+    
     # Apply orientation deltas
     enable_orientation: bool = True
+    rot_deadband_rad: float = 0.05
 
     # Filtering
     delta_filter_alpha: float = 0.25  # (higher = snappier, lower = smoother)

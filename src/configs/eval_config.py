@@ -10,16 +10,17 @@ from src.configs.collector_config import RGBDCameraSpec, RGBCameraSpec, CameraSy
 @dataclass
 class EvalConfig:
     # ---------------- model ----------------
-    model_ckpt_path: str = "/root/catkin_ws/src/experiment/demos-50_agentview-pass_through_eye_in_hand-pass_through_seed-0/checkpoints/latest.ckpt"
+    # model_ckpt_path: str = "/root/catkin_ws/src/real_ws/attention-seeker/experiments/three_piece_toy_d1/policy_baseline_mild_overlay/demos-100_agentview-random_overlay_eye_in_hand-random_overlay_seed-0/checkpoints/latest.ckpt"
+    model_ckpt_path: str = "/root/catkin_ws/src/real_ws/attention-seeker/experiments/three_piece_toy_d1/policy_baseline_mild_overlay/demos-100_agentview-random_overlay_eye_in_hand-random_overlay_seed-0/checkpoints/latest.ckpt"
     result_log_dir: str = "../evaluation/"
     device: str = "cuda"  # "cuda" | "cpu"
     seed: int = 0
-    n_rollouts: int = 20
-    horizon: int = 400
-    task_name: str = "real_pick_place_veggis_d1"
-    model_name: str = "dp_baseline"
+    n_rollouts: int = 10
+    horizon: int = 1000
+    task_name: str = "three_piece_toy_d1"
+    model_name: str = "baseline_background"
     record: bool = True
-    video_fps: int = 10
+    video_fps: int = 5  
     record_cam: str = "d435i_front"
 
     # ---------------- observation keys ----------------
@@ -29,13 +30,13 @@ class EvalConfig:
 
     # ---------------- temporal policy spec ----------------
     obs_horizon: int = 1     # To
-    pred_horizon: int = 8    # Ta
-    exec_horizon: int = 4    # Te (1..Ta)
+    pred_horizon: int = 16    # Ta
+    exec_horizon: int = 8    # Te (1..Ta)
     dt_ctrl: float = 1.0 / 30.0
     use_delay_comp: bool = True
     
     # ---------------- smooth interpolation ----------------
-    interp_steps: int = 10
+    interp_steps: int = 3
     gripper_interp_mode: str = "hold" # "hold" | "linear"
     max_step_trans: float = 10.0  # mm
     max_step_rot_rad: float = 0.15  # rad

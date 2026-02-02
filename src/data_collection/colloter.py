@@ -366,36 +366,47 @@ class TeleopDataCollector:
     # ---------------- validation ----------------
     def _validate_lowdim_common(self, sample: SyncedSample) -> Optional[Dict[str, Any]]:
         if not bool(getattr(sample, "allow_control", False)):
+            rospy.logdebug("[validate] reject: allow_control is False or missing")
             return None
 
         t = getattr(sample, "stamp_sync", None)
         if t is None or not _is_finite_scalar(t):
+            rospy.logdebug(f"[validate] reject: invalid stamp_sync = {t}")
             return None
         t = float(t)
 
         rs = getattr(sample, "robot_state", None)
         if rs is None:
+            rospy.logdebug("[validate] reject: robot_state is None")
             return None
 
         ee_pose = getattr(rs, "ee_pose", None)
-        joints = getattr(rs, "joint_angles", None)
-        gripper = getattr(rs, "gripper_qpos", None)
-
         if ee_pose is None or not _is_finite_vec6(ee_pose):
+            rospy.logdebug(f"[validate] reject: invalid ee_pose = {ee_pose}")
             return None
+
+        joints = getattr(rs, "joint_angles", None)
         if joints is None or not _is_finite_list(joints, n_min=1):
+            rospy.logdebug(f"[validate] reject: invalid joint_angles = {joints}")
             return None
+
+        gripper = getattr(rs, "gripper_qpos", None)
         if gripper is None or not _is_finite_scalar(gripper):
+            rospy.logdebug(f"[validate] reject: invalid gripper_qpos = {gripper}")
             return None
 
         desired = getattr(sample, "desired_pose6_mm_rpy", None)
         if desired is None or not isinstance(desired, list) or len(desired) != 6 or not _is_finite_vec6(desired):
+            rospy.logdebug(f"[validate] reject: invalid desired_pose6_mm_rpy = {desired}")
             return None
 
         cmd_grip = getattr(sample, "cmd_gripper", None)
-        if cmd_grip is None or not _is_finite_scalar(cmd_grip):
+        if self.cfg.disable_gripper:
+            cmd_grip = getattr(self.cfg, "fixed_gripper", None)
+        elif cmd_grip is None or not _is_finite_scalar(cmd_grip):
+            rospy.logdebug(f"[validate] reject: invalid cmd_gripper = {cmd_grip}")
             return None
-
+        
         return {
             "timestamp": t,
             "joint_states": [float(x) for x in joints],
@@ -405,6 +416,7 @@ class TeleopDataCollector:
             "pose_targets_gripper": float(cmd_grip),
             "deadman_released": bool(getattr(sample, "deadman_released", False)),
         }
+
 
     def _validate_cams_all(self, cams: Any) -> bool:
         if not isinstance(cams, dict):
@@ -451,16 +463,13 @@ class TeleopDataCollector:
         if not self.demo_in_progress or self._ep_all is None:
             rospy.logwarn("[Collector] Episode all is {}, skipping sample.".format(self._ep_all))
             return
-        print("aaaaaaaaaaaaaa")
         lowdim = self._validate_lowdim_common(sample)
         if lowdim is None:
             return
 
         cams = getattr(sample, "cameras", None)
-        print("cams", cams)
         if not self._validate_cams_all(cams):
             return
-        print("bbbbbbbbbbbbbbb")
         idx = self._frame_all
         for cam_name, cam_msgs in cams.items():
             rgb_dir, depth_dir = self._ensure_cam_dirs_all(cam_name)
@@ -472,13 +481,11 @@ class TeleopDataCollector:
                     os.path.join(rgb_dir, f"{idx:06d}.png"),
                     img,
                 )
-            print("ddddddddddddddd")
             # Depth (always .npy for speed)
             if self.cfg.save_depth_npy:
                 depth = self.bridge.imgmsg_to_cv2(cam_msgs.depth, desired_encoding="passthrough")
                 np.save(os.path.join(depth_dir, f"{idx:06d}.npy"), depth.astype(np.uint16), allow_pickle=False)
 
-        print("ccccccccccccccc")
         self._lowdim_all.append(lowdim)
         self._frame_all += 1
         rospy.loginfo_throttle(1.0, f"[Collector] all_sensors saving frame {self._frame_all}")
@@ -492,10 +499,12 @@ class TeleopDataCollector:
 
         lowdim = self._validate_lowdim_common(sample)
         if lowdim is None:
+            rospy.logwarn("[Collector] Lowdim is None, skipping sample.")
             return
 
         cams = getattr(sample, "cameras", None)
         if not self._validate_cams_light(cams):
+            rospy.logwarn("[Collector] Cams is None, skipping sample.")
             return
 
         idx = self._frame_light
@@ -507,9 +516,9 @@ class TeleopDataCollector:
                 os.path.join(rgb_dir, f"{idx:06d}.png"),
                 img,
             )
-
         self._lowdim_light.append(lowdim)
         self._frame_light += 1
+        rospy.loginfo_throttle(1.0, f"[Collector] light saving frame {self._frame_light}")
 
     # ---------------- finish ----------------
     def _check_integrity_stream(

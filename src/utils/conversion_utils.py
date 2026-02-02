@@ -150,12 +150,46 @@ def rotation_angle_between(Ra: np.ndarray, Rb: np.ndarray) -> float:
 
 # ------------------------ image preprocessing ------------------------
 
-def center_square_crop(img_bgr: np.ndarray) -> np.ndarray:
+# def center_square_crop(img_bgr: np.ndarray) -> np.ndarray:
+#     h, w = img_bgr.shape[:2]
+#     s = min(h, w)
+#     y0 = (h - s) // 2
+#     x0 = (w - s) // 2
+#     return img_bgr[y0:y0 + s, x0:x0 + s]
+
+def center_square_crop(img_bgr: np.ndarray, camera_name: str, front_crop_ratio=0.8) -> np.ndarray:
     h, w = img_bgr.shape[:2]
-    s = min(h, w)
-    y0 = (h - s) // 2
-    x0 = (w - s) // 2
-    return img_bgr[y0:y0 + s, x0:x0 + s]
+
+    if camera_name == "d405":
+        # Pad on TOP with black so height == width
+        if h < w:
+            pad = w - h
+            top_pad = pad
+            bottom_pad = 0
+        else:
+            top_pad = 0
+            bottom_pad = 0  # already square or tall
+
+        img_padded = cv2.copyMakeBorder(
+            img_bgr,
+            top=top_pad,
+            bottom=bottom_pad,
+            left=0,
+            right=0,
+            borderType=cv2.BORDER_CONSTANT,
+            value=(0, 0, 0),  # black
+        )
+        return img_padded
+
+    elif camera_name == "d435i_front":
+        # center crop for frontview
+        s = min(h, w)
+        cx, cy = h // 2, w // 2
+        img_length = int(s * front_crop_ratio)
+        return img_bgr[h - img_length : h, cy - img_length // 2 : cy + img_length // 2]
+
+    else:
+        raise NotImplementedError(f"unknown camera name: {camera_name}")
 
 # ------------------------ cuda ------------------------
 def dict_apply(

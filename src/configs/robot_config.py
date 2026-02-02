@@ -32,7 +32,7 @@ MODE_SERVO_CART = 1
 
 # Gripper limits
 GRIPPER_MIN = -10
-GRIPPER_MAX = 850
+GRIPPER_MAX = 850.0
 
 # TCP Velocity limits
 MAX_TCP_LIN_M_S = 0.25   # m/s

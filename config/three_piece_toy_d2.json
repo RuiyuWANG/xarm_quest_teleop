@@ -5,7 +5,7 @@
     "robot": "xarm7",
     "gripper": "xarm_gripper",
     "description": "Insert the three stamps in the holder.",
-    "num_demos": 50,
+    "num_demos": 200,
 
     "demo_id_start": 0,
     "demo_prefix": "episode_",
@@ -19,8 +19,12 @@
         "setup": "eye_to_hand",
         "depth_scale": 0.001,
         "depth_to_rgb": {
-            "rotation":[],
-            "translation":[]
+            "rotation":[0.014596901834011078, 9.899625001708046e-05, 0.0003756750957109034],
+            "translation":[
+                [0.9999709129333496, 0.0021850953344255686, -0.007303950842469931], 
+                [-0.0021897703409194946, 0.9999973773956299, -0.0006320994580164552], 
+                [0.007302550598978996, 0.0006480750744231045, 0.9999731183052063]
+            ]
         },
         "rgb": {
             "intrinsics": {
@@ -47,8 +51,11 @@
         "depth": {
             "intrinsics": {
                 "K": [
+                    [427.1893005371094, 0.0, 428.4807434082031], 
+                    [0.0, 427.1893005371094, 242.9452667236328], 
+                    [0.0, 0.0, 1.0]
                 ],
-                "dist": [],
+                "dist": [0.0, 0.0, 0.0, 0.0, 0.0],
                 "width": 848,
                 "height": 480,
                 "source": "ROS CameraInfo"

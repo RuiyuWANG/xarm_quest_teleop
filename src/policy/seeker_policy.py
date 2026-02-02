@@ -70,6 +70,10 @@ eval_shape_meta = {
 
 TASK_DICT = {
     "real_pick_place_veggis_d1": "Pick up he purple toy eggplant and place it in the brown box.",
+    "cleanup_table_d2": "Clean up the table.",
+    "three_piece_toy_d2": "Insert the three stamps in the holder.",
+    "coffee_transport_d1": "Transport the coffee beans from the bowl to the cup.",
+    "three_piece_toy_d1": "Insert the three stamps in the holder.",
 }
 
 def try_task_embedding(task_descriptions: List[str]) -> Optional[np.ndarray]:
@@ -99,6 +103,7 @@ class SeekerPolicy(NetBase):
         cls = hydra.utils.get_class(cfg._target_)
         workspace = cls(cfg, output_dir=None)
         workspace: BaseWorkspace
+        print(payload.keys())
         workspace.load_payload(payload, exclude_keys=None, include_keys=None)
 
         print(f"Action mode: {cfg.action_mode}")
@@ -152,7 +157,7 @@ class SeekerPolicy(NetBase):
                     raise ValueError(f"{cam_key}: expected HWC RGB, got {im.shape}")
 
                 # HARDCODED
-                im = center_square_crop(im)
+                im = center_square_crop(im, camera_name=cam_key)
                 target = 240
                 if (im.shape[0] != target) or (im.shape[1] != target):
                     im = cv2.resize(im, (target, target), interpolation=cv2.INTER_AREA)
