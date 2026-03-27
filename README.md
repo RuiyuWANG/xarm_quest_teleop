@@ -14,6 +14,7 @@
    2. Reboot Quest to sign in as owner. Press open and volume - at the same time. Connect Quest to the same WiFi of PC, and connect to app.
    3. In app, enable developer mode.
    4. Check Quest network IP and ping IP on PC to check connectivity.
+   5. download the teleoperation app following, https://quest2ros.github.io/
 
 3. Setup cameras.
 
@@ -59,8 +60,8 @@
    source ~/catkin_ws/devel/setup.zsh 2>/dev/null || source ~/catkin_ws/devel/setup.bash
    ```
 
-2. Quest
-   Follow:
+2. Quest: https://quest2ros.github.io/
+   Follow: 
    ```
    roslaunch ros_tcp_endpoint endpoint.launch tcp_ip:=192.168.0.182 tcp_port:=10000
    ```
@@ -75,7 +76,7 @@
    ```
 
 3. Robot
-   Follow:
+   Follow: https://github.com/xarm-developer/xarm_ros
 
    Test robot connection:
    ```
@@ -150,6 +151,8 @@
    apt install -y ros-noetic-rviz
    ```
 
+In your persistent docker scr file, there should be:  quest2ros  realsense-ros  ROS-TCP-Endpoint  xarm_ros CloudGripper_Manipulation
+
 
 # Install Teleop
 1. Warp robot and quest info to get timestamped topic for sychronization, build teleop_msgs
@@ -168,7 +171,6 @@
 
 2. Add scripts to launch nodes for timestamped topics, build cloudgripper_teleop
    ```
-   chmod +x ~/catkin_ws/src/cloudgripper_teleop/scripts/robot_state_stamp_node.py
    cd ~/catkin_ws
    catkin build cloudgripper_teleop
    source ~/catkin_ws/devel/setup.zsh
@@ -184,4 +186,11 @@
    ```
    roscore
    ```
-3. Run Scripts
+3. Run Teleop
+   python src/scripts/run_quest_xarm_teleop_sync.py
+
+4. run data collection
+   python src/scripts/run_data_collection.py
+
+5. run policy 
+   python src/scripts/run_policy_eval.py
