@@ -52,6 +52,7 @@ class CameraSyncConfig:
         ),
     })
     
+@dataclass
 class RobotSyncConfig:
     robot_match_window_s: float = 0.05
     keep_s: float = 1.0
@@ -86,7 +87,7 @@ class AutoLaunchConfig:
         "enable_color:=true", "enable_depth:=true", "enable_gyro:=false", "enable_accel:=false", "enable_infra1:=false", "enable_infra2:=false",
         "filters:=",
         "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=false",
-        "depth_width:=848", "depth_height:=480", "depth_fps:=30"
+        "depth_width:=848", "depth_height:=480", "depth_fps:=30",
         "enable_sync:=false", "initial_reset:=true",
         ],
         ["roslaunch", "realsense2_camera", "rs_camera.launch",
@@ -94,7 +95,7 @@ class AutoLaunchConfig:
         "enable_color:=true", "enable_depth:=true", "enable_gyro:=false", "enable_accel:=false", "enable_infra1:=false", "enable_infra2:=false",
         "filters:=",
         "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=false",
-        "depth_width:=848", "depth_height:=480", "depth_fps:=30"
+        "depth_width:=848", "depth_height:=480", "depth_fps:=30",
         "enable_sync:=false", "initial_reset:=true",
         ],
     ])
