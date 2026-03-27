@@ -126,7 +126,6 @@ def main():
         teleop.register_hook(teleop_hook)
     else:
         # no quest: push minimal samples from robot state
-        # TODO: read ts from robot state
         def robot_ring_thread():
             r = rospy.Rate(90.0)
             while not rospy.is_shutdown():

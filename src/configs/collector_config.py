@@ -27,18 +27,15 @@ class CameraSyncConfig:
     rgb_queue_size: int = 60
 
     cameras_all: Dict[str, RGBDCameraSpec] = field(default_factory=lambda: {
-        # "d405": RGBDCameraSpec(
-        #     rgb_topic="/d405/color/image_raw",
-        #     depth_topic="/d405/aligned_depth_to_color/image_raw",
-        # ),
+        "d405": RGBDCameraSpec(
+            rgb_topic="/d405/color/image_raw",
+        ),
         "d435i_front": RGBDCameraSpec(
             rgb_topic="/d435i_front/color/image_raw",
-            # depth_topic="/d435i_front/aligned_depth_to_color/image_raw",
             depth_topic="/d435i_front/depth/image_rect_raw"
         ),
         "d435i_shoulder": RGBDCameraSpec(
             rgb_topic="/d435i_shoulder/color/image_raw",
-            # depth_topic="/d435i_shoulder/aligned_depth_to_color/image_raw",
             depth_topic="/d435i_shoulder/depth/image_rect_raw"
         ),
     })
@@ -116,13 +113,12 @@ class AutoLaunchConfig:
         ],
     ])
 
-# TODO: to support subtask point tracking from quest input
 @dataclass
 class CollectorConfig:
     # saving
     save_rgb_png: bool = True
-    save_depth_npy: bool = True
-    enable_full_sync: bool = True
+    save_depth_npy: bool = False
+    enable_full_sync: bool = False
     enable_light_sync: bool = True
     max_queue: int = 200
     disable_gripper: bool = False

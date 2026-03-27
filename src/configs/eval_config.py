@@ -10,8 +10,7 @@ from src.configs.collector_config import RGBDCameraSpec, RGBCameraSpec, CameraSy
 @dataclass
 class EvalConfig:
     # ---------------- model ----------------
-    # model_ckpt_path: str = "/root/catkin_ws/src/real_ws/attention-seeker/experiments/three_piece_toy_d1/policy_baseline_mild_overlay/demos-100_agentview-random_overlay_eye_in_hand-random_overlay_seed-0/checkpoints/latest.ckpt"
-    model_ckpt_path: str = "/root/catkin_ws/src/real_ws/attention-seeker/experiments/three_piece_toy_d1/policy_baseline_mild_overlay/demos-100_agentview-random_overlay_eye_in_hand-random_overlay_seed-0/checkpoints/latest.ckpt"
+    model_ckpt_path: str = "./"
     result_log_dir: str = "../evaluation/"
     device: str = "cuda"  # "cuda" | "cpu"
     seed: int = 0
