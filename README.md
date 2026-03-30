@@ -1,4 +1,4 @@
-# XArm ROS1 Quest Teleoperation
+# XArm ROS1 VR Teleoperation
 
 This repository supports UFactory xArm7 + xArm gripper teleoperation through Meta Quest 2, a data collection pipeline for VR human demonstrations, and policy evaluation stack for:
 - xArm + gripper
