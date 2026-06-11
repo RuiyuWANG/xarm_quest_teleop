@@ -1,0 +1,14 @@
+{
+  "profile": "rollout",
+  "ckpt": "seeker-dev/real_eval_ckpts/coffee_transport_d1/focuspool_l2/ckpt/latest.ckpt",
+  "task": "coffee_transport_d1",
+  "name": "focuspool_l2",
+  "eval_name": "default",
+  "calib": "all_cams_calib.json",
+  "result_log_dir": "evaluation/",
+  "seed": 0,
+  "n_rollouts": 20,
+  "horizon": 1000,
+  "exec_horizon": 6,
+  "live_viz": true
+}

@@ -36,7 +36,7 @@ def main():
     teleop_cfg = TeleopConfig()
     services = XArmServices()
 
-    dataset_json = rospy.get_param("~dataset_json", "three_piece_toy_d1.json")
+    dataset_json = rospy.get_param("~dataset_json", "lego_build_d2.json")
     dataset_json = resolve_path(dataset_json)
     ds = load_dataset_json(dataset_json)
 
@@ -52,8 +52,8 @@ def main():
     collect_period = 1.0 / collect_hz
     lock = threading.Lock()
     latest_full = {"t": None, "cams": None}
-    latest_light = {"t": None, "imgs": None}
-    last_enqueued_t_cam = {"full": None, "light": None}
+    latest_rgb = {"t": None, "imgs": None}
+    last_enqueued_t_cam = {"full": None, "rgb": None}
 
     # ----------------------------------------------------------------------------------------
 
@@ -80,7 +80,7 @@ def main():
             sup.start(ManagedProcess("xarm_bringup", L.robot_cmd, L.workdir, L.pipe_output))
 
         if L.auto_launch_realsense:
-            cmds = L.realsense_all_launch_cmds if collector_cfg.enable_full_sync else L.realsense_light_launch_cmds
+            cmds = L.realsense_all_launch_cmds if collector_cfg.enable_full_sync else L.realsense_rgb_launch_cmds
             for i, cmd in enumerate(cmds):
                 sup.start(ManagedProcess(f"realsense_{i}", cmd, L.workdir, L.pipe_output))
 
@@ -112,7 +112,7 @@ def main():
         raise SystemExit(1)
 
     # Wait for camera topics based on enabled syncs
-    assert not (not collector_cfg.enable_full_sync and not collector_cfg.enable_light_sync), \
+    assert not (not collector_cfg.enable_full_sync and not collector_cfg.enable_rgb_sync), \
         "At least one camera sync must be enabled"
 
     if collector_cfg.enable_full_sync:
@@ -124,10 +124,10 @@ def main():
                 rospy.logerr(f"[startup] missing full camera depth topic ({cam_name}): {spec.depth_topic}")
                 raise SystemExit(1)
 
-    if collector_cfg.enable_light_sync:
-        for cam_name, spec in collector_cfg.cam_sync.cameras_light.items():
+    if collector_cfg.enable_rgb_sync:
+        for cam_name, spec in collector_cfg.cam_sync.cameras_rgb.items():
             if not wait_for_topic(spec.rgb_topic, teleop_cfg.startup_timeout_s):
-                rospy.logerr(f"[startup] missing light camera rgb topic ({cam_name}): {spec.rgb_topic}")
+                rospy.logerr(f"[startup] missing rgb camera topic ({cam_name}): {spec.rgb_topic}")
                 raise SystemExit(1)
 
     rospy.loginfo("[startup] ready ✅")
@@ -175,15 +175,15 @@ def main():
 
         cam_sync3.on_set = on_full_set
 
-    # ---------------- LIGHT sync: 2 cams RGB only ----------------
-    if collector_cfg.enable_light_sync:
-        cam_light_dict = {
+    # ---------------- RGB sync: 2 cams RGB only ----------------
+    if collector_cfg.enable_rgb_sync:
+        cam_rgb_dict = {
             k: {"rgb_topic": v.rgb_topic}
-            for k, v in collector_cfg.cam_sync.cameras_light.items()
+            for k, v in collector_cfg.cam_sync.cameras_rgb.items()
         }
 
         cam_rgb_sync2 = TwoRgbSync(
-            cameras=cam_light_dict,
+            cameras=cam_rgb_dict,
             slop_s=float(collector_cfg.cam_sync.rgb_slop_s),
             queue_size=int(collector_cfg.cam_sync.rgb_queue_size),
         )
@@ -191,8 +191,8 @@ def main():
         # NEW: callback only caches latest synced set (no enqueue here)
         def on_rgb2_set(t_cam, imgs):
             with lock:
-                latest_light["t"] = float(t_cam)
-                latest_light["imgs"] = imgs
+                latest_rgb["t"] = float(t_cam)
+                latest_rgb["imgs"] = imgs
 
         cam_rgb_sync2.on_set = on_rgb2_set
 
@@ -201,13 +201,13 @@ def main():
         now = rospy.Time.now().to_sec()
 
         use_full = bool(collector_cfg.enable_full_sync)
-        use_light = bool(collector_cfg.enable_light_sync)
+        use_rgb = bool(collector_cfg.enable_rgb_sync)
 
         with lock:
             t_full = latest_full["t"]
             cams_full = latest_full["cams"]
-            t_light = latest_light["t"]
-            imgs_light = latest_light["imgs"]
+            t_rgb = latest_rgb["t"]
+            imgs_rgb = latest_rgb["imgs"]
 
         # ---- FULL ----
         if use_full and t_full is not None and cams_full is not None:
@@ -220,16 +220,16 @@ def main():
                     collector.enqueue_all(s_out)
                     last_enqueued_t_cam["full"] = float(t_full)
 
-        # ---- LIGHT ----
-        if use_light and t_light is not None and imgs_light is not None:
-            if last_enqueued_t_cam["light"] is None or abs(float(t_light) - float(last_enqueued_t_cam["light"])) >= 1e-9:
-                s = sample_ring.nearest(float(t_light), float(collector_cfg.robot_sync.robot_match_window_s))
+        # ---- RGB ----
+        if use_rgb and t_rgb is not None and imgs_rgb is not None:
+            if last_enqueued_t_cam["rgb"] is None or abs(float(t_rgb) - float(last_enqueued_t_cam["rgb"])) >= 1e-9:
+                s = sample_ring.nearest(float(t_rgb), float(collector_cfg.robot_sync.robot_match_window_s))
                 if s is not None and bool(getattr(s, "allow_control", False)):
                     s_out = copy.copy(s)
-                    s_out.cameras = imgs_light
-                    s_out.stamp_sync = float(t_light)
-                    collector.enqueue_light(s_out)
-                    last_enqueued_t_cam["light"] = float(t_light)
+                    s_out.cameras = imgs_rgb
+                    s_out.stamp_sync = float(t_rgb)
+                    collector.enqueue_rgb(s_out)
+                    last_enqueued_t_cam["rgb"] = float(t_rgb)
 
     rospy.Timer(rospy.Duration(collect_period), collect_tick)
     rospy.loginfo(f"[main] fixed-rate collection enabled: {collect_hz:.3f} Hz (period={collect_period:.3f}s)")

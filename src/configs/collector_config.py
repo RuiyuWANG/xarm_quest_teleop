@@ -43,7 +43,7 @@ class CameraSyncConfig:
         ),
     })
     
-    cameras_light: Dict[str, RGBCameraSpec] = field(default_factory=lambda: {
+    cameras_rgb: Dict[str, RGBCameraSpec] = field(default_factory=lambda: {
         "d405": RGBCameraSpec(
             rgb_topic="/d405/color/image_raw",
         ),
@@ -86,7 +86,7 @@ class AutoLaunchConfig:
         "enable_color:=true", "enable_depth:=true", "enable_gyro:=false", "enable_accel:=false", "enable_infra1:=false", "enable_infra2:=false",
         "filters:=",
         "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=false",
-        "depth_width:=848", "depth_height:=480", "depth_fps:=30"
+        "depth_width:=848", "depth_height:=480", "depth_fps:=30",
         "enable_sync:=false", "initial_reset:=true",
         ],
         ["roslaunch", "realsense2_camera", "rs_camera.launch",
@@ -94,12 +94,12 @@ class AutoLaunchConfig:
         "enable_color:=true", "enable_depth:=true", "enable_gyro:=false", "enable_accel:=false", "enable_infra1:=false", "enable_infra2:=false",
         "filters:=",
         "color_width:=848", "color_height:=480", "color_fps:=30", "align_depth:=false",
-        "depth_width:=848", "depth_height:=480", "depth_fps:=30"
+        "depth_width:=848", "depth_height:=480", "depth_fps:=30",
         "enable_sync:=false", "initial_reset:=true",
         ],
     ])
     
-    realsense_light_launch_cmds: List[List[str]] = field(default_factory=lambda: [
+    realsense_rgb_launch_cmds: List[List[str]] = field(default_factory=lambda: [
         ["roslaunch", "realsense2_camera", "rs_camera.launch",
         "serial_no:=230322271104", "camera:=d405",
         "enable_color:=true", "enable_depth:=false",
@@ -120,9 +120,9 @@ class AutoLaunchConfig:
 class CollectorConfig:
     # saving
     save_rgb_png: bool = True
-    save_depth_npy: bool = True
-    enable_full_sync: bool = True
-    enable_light_sync: bool = True
+    save_depth_npy: bool = False
+    enable_full_sync: bool = False
+    enable_rgb_sync: bool = True
     max_queue: int = 200
     disable_gripper: bool = False
     fixed_gripper: float = 0.0

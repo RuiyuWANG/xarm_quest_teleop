@@ -119,6 +119,14 @@ class QuestXArmTeleopSync:
     def register_hook(self, fn: Callable[[SyncedSample], None]):
         self._hooks.append(fn)
 
+    def _apply_grip_deadband(self, u: float) -> float:
+        deadband = float(self.cfg.grip_input_deadband)
+        if deadband <= 0.0:
+            return float(clamp(u, 0.0, 1.0))
+        if u <= deadband:
+            return 0.0
+        return float(clamp((u - deadband) / max(1e-6, 1.0 - deadband), 0.0, 1.0))
+
     # ---------------- input helpers ----------------
     def _deadman(self, inputs_st: OVR2ROSInputsStamped) -> bool:
         if not self.cfg.require_deadman:
@@ -289,12 +297,23 @@ class QuestXArmTeleopSync:
 
         close_u = clamp(close_u, 0.0, 1.0)
         open_u  = clamp(open_u, 0.0, 1.0)
+        close_u = self._apply_grip_deadband(close_u)
+        open_u = self._apply_grip_deadband(open_u)
 
         u = clamp(open_u - close_u, -1.0, 1.0)
+        if abs(u) <= 1e-6:
+            if self._last_grip_pulse is not None:
+                return self._last_grip_pulse
+            _, current_gpos = self.robot.get_gripper_state()
+            if current_gpos >= 0.0:
+                self._last_grip_pulse = current_gpos
+                return current_gpos
+            return None
 
         # Incremental control around last pulse
         if self._last_grip_pulse is None:
-            pulse = (GRIPPER_MAX + GRIPPER_MIN) * 0.5
+            _, current_gpos = self.robot.get_gripper_state()
+            pulse = current_gpos if current_gpos >= 0.0 else (GRIPPER_MAX + GRIPPER_MIN) * 0.5
         else:
             pulse = self._last_grip_pulse
 

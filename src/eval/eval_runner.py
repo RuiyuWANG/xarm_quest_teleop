@@ -1,10 +1,11 @@
 # src/eval/eval_runner.py
 from __future__ import annotations
 
+import json
 import time
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import os
@@ -14,17 +15,12 @@ from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from pynput import keyboard
 
+from src.eval.action_executor import PolicyActionExecutor
+from src.eval.live_viz import LiveVizRenderer
 from src.io.process_manager import TemporalObsBuffer, ObsPacket, SampleRing
-from src.utils.conversion_utils import (
-    xyz6g_to_action_abs,
-    pose6_to_xyz6,
-    center_square_crop,
-    se3_interp_xyz_rot6,
-    rot6d_to_R,
-    rotation_angle_between,
-)
 from src.configs.eval_config import EvalConfig
 from src.io.video_recorder import AsyncVideoWriter
+from src.policy.seeker_preprocessing import preprocess_real_rgb_image
 
 
 @dataclass
@@ -49,11 +45,17 @@ class EvalRunner:
         self.robot = robot
         self.net = net
         self.sample_ring = sample_ring
+        if result_log_dir is not None:
+            self.cfg.result_log_dir = result_log_dir
 
         self.bridge = CvBridge()
         self.obs_buf = TemporalObsBuffer(maxlen=100)
 
         self.state = RunState(running=False, continue_requested=(False))  # True if gating
+
+        self.action_executor = PolicyActionExecutor(cfg=self.cfg, robot=self.robot)
+        self.action_executor.bind_runtime_state(self.state, lambda: self._stop)
+        self.live_viz_renderer = LiveVizRenderer(cfg=self.cfg)
 
         # internal
         self._stop = False
@@ -61,31 +63,41 @@ class EvalRunner:
         self._kb_thread = threading.Thread(target=self._keyboard_loop, daemon=True)
 
         # planning/execution state
-        self._last_grip_bin: Optional[int] = None
         self._plan_t_obs: float = 0.0
-        self._last_exec_action10: Optional[np.ndarray] = None
+        self._live_viz_available = True
 
         # logging
         # --- logging dir ---
+        result_root = self._resolve_repo_path(self.cfg.result_log_dir)
         self.run_dir = os.path.join(
-            str(self.cfg.result_log_dir),
+            result_root,
             str(self.cfg.task_name),
             str(self.cfg.model_name),
-            str(self.cfg.seed),
+            str(self.cfg.eval_name),
         )
         os.makedirs(self.run_dir, exist_ok=True)
+        self.state_trace_dir: Optional[str] = None
+        self._cur_state_trace_path: Optional[str] = None
         if self.cfg.record:
             self.video_dir = os.path.join(self.run_dir, "videos")
+            self.attention_video_dir = os.path.join(self.run_dir, "visualization_videos")
+            self.state_trace_dir = os.path.join(self.run_dir, "state_traces")
             os.makedirs(self.video_dir, exist_ok=True)
+            os.makedirs(self.attention_video_dir, exist_ok=True)
+            os.makedirs(self.state_trace_dir, exist_ok=True)
 
             # --- video (fixed-rate recording between 'c' and success/fail) ---
             fps = int(getattr(self.cfg, "record_fps", getattr(self.cfg, "video_fps", 10)))
             self._video = AsyncVideoWriter(fps=fps)
+            self._attention_video = AsyncVideoWriter(fps=fps)
             self._cur_rollout_video_path: Optional[str] = None
+            self._cur_attention_video_path: Optional[str] = None
             self._recording_active = False
+            self._attention_recording_active = False
             self._record_thread: Optional[threading.Thread] = None
             self._record_lock = threading.Lock()
             self._latest_record_frame: Optional[np.ndarray] = None
+            self._latest_attention_frame: Optional[np.ndarray] = None
 
         self.result_log_path = os.path.join(self.run_dir, "result.txt")
 
@@ -95,6 +107,29 @@ class EvalRunner:
         # --- horizon counters (model inference steps) ---
         self._infer_steps_in_rollout = 0
         self._cur_rollout_status: Optional[str] = None
+
+    @staticmethod
+    def _repo_root() -> str:
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+    @classmethod
+    def _resolve_repo_path(cls, path: str) -> str:
+        expanded = os.path.expanduser(str(path))
+        if os.path.isabs(expanded):
+            return expanded
+        return os.path.join(cls._repo_root(), expanded)
+
+    @staticmethod
+    def _jsonable(value):
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return {str(k): EvalRunner._jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [EvalRunner._jsonable(v) for v in value]
+        return value
 
     # ---------------- lifecycle ----------------
     def start(self):
@@ -109,16 +144,57 @@ class EvalRunner:
         if not self.cfg.record:
             return
         try:
-            cam_pref = getattr(self.cfg, "record_cam", None)
             cam_keys = list(rgb_dict.keys())
             if not cam_keys:
                 return
-            cam = cam_pref if (cam_pref is not None and cam_pref in cam_keys) else cam_keys[0]
-            frame = rgb_dict[cam]  # HWC RGB uint8
+            cam = "d435i_front" if "d435i_front" in cam_keys else cam_keys[0]
+            frame = preprocess_real_rgb_image(rgb_dict[cam], camera_name=cam)
             with self._record_lock:
                 self._latest_record_frame = frame.copy()
         except Exception:
             pass
+
+    def _render_inference_viz(self, temporal_obs: Dict[str, Any], acts: np.ndarray) -> None:
+        live_viz = bool(getattr(self.cfg, "live_viz", False))
+        if not live_viz and not self.cfg.record:
+            return
+        s_idx, _ = self.action_executor.compute_exec_slice()
+        focus_records = list(getattr(self.net, "last_visual_focus_records", []))
+
+        if live_viz:
+            overlay = self.live_viz_renderer.make_frame(
+                temporal_obs=temporal_obs,
+                acts=acts,
+                current_exec_start_idx=s_idx,
+                focus_records=focus_records,
+            )
+            if overlay is not None:
+                self._show_live_viz(overlay)
+
+        if self.cfg.record:
+            attention_overlay = self.live_viz_renderer.make_method_viz_frame(
+                temporal_obs=temporal_obs,
+                focus_records=focus_records,
+            )
+            if attention_overlay is not None:
+                with self._record_lock:
+                    self._latest_attention_frame = attention_overlay.copy()
+                self._start_attention_video_for_rollout()
+
+    def _show_live_viz(self, overlay: np.ndarray) -> None:
+        if not bool(getattr(self.cfg, "live_viz", False)):
+            return
+        if not self._live_viz_available:
+            return
+        try:
+            cv2.imshow("CloudGripper Live Viz", cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+            cv2.waitKey(1)
+        except Exception as exc:
+            self._live_viz_available = False
+            rospy.logwarn(
+                "[EvalRunner] live visualization disabled after display error: "
+                f"{exc}"
+            )
 
     def _record_loop(self):
         fps = float(getattr(self.cfg, "record_fps", getattr(self.cfg, "video_fps", 10)))
@@ -128,13 +204,21 @@ class EvalRunner:
             t0 = time.time()
 
             frame = None
+            attention_frame = None
             with self._record_lock:
                 if self._latest_record_frame is not None:
                     frame = self._latest_record_frame.copy()
+                if self._latest_attention_frame is not None:
+                    attention_frame = self._latest_attention_frame.copy()
 
             if frame is not None:
                 try:
                     self._video.enqueue(frame)
+                except Exception:
+                    pass
+            if attention_frame is not None and self._attention_recording_active:
+                try:
+                    self._attention_video.enqueue(attention_frame)
                 except Exception:
                     pass
 
@@ -152,6 +236,7 @@ class EvalRunner:
             return
 
         self._start_rollout_video()
+        self._start_state_trace_for_rollout()
         self._recording_active = True
         self._record_thread = threading.Thread(target=self._record_loop, daemon=True)
         self._record_thread.start()
@@ -176,6 +261,10 @@ class EvalRunner:
             self._video.stop()
         except Exception:
             pass
+        try:
+            self._attention_video.stop()
+        except Exception:
+            pass
 
         if self._cur_rollout_video_path is not None:
             try:
@@ -184,8 +273,27 @@ class EvalRunner:
                     rospy.logwarn(f"[EvalRunner] deleted pending video: {self._cur_rollout_video_path}")
             except Exception as e:
                 rospy.logwarn(f"[EvalRunner] failed to delete pending video: {e}")
+        if self._cur_attention_video_path is not None:
+            try:
+                if os.path.exists(self._cur_attention_video_path):
+                    os.remove(self._cur_attention_video_path)
+                    rospy.logwarn(f"[EvalRunner] deleted pending visualization video: {self._cur_attention_video_path}")
+            except Exception as e:
+                rospy.logwarn(f"[EvalRunner] failed to delete pending visualization video: {e}")
+        if self._cur_state_trace_path is not None:
+            try:
+                if os.path.exists(self._cur_state_trace_path):
+                    os.remove(self._cur_state_trace_path)
+                    rospy.logwarn(f"[EvalRunner] deleted pending state trace: {self._cur_state_trace_path}")
+            except Exception as e:
+                rospy.logwarn(f"[EvalRunner] failed to delete pending state trace: {e}")
 
         self._cur_rollout_video_path = None
+        self._cur_attention_video_path = None
+        self._cur_state_trace_path = None
+        self._attention_recording_active = False
+        with self._record_lock:
+            self._latest_attention_frame = None
         self._cur_rollout_status = None
 
     # ---------------- keyboard ----------------
@@ -243,13 +351,14 @@ class EvalRunner:
                 rospy.loginfo(f"[EvalRunner] marked FAIL ({self.state.success_count}/{max(1,self.state.episode_idx)})")
 
             elif ch == "q":
-                rospy.logwarn("[EvalRunner] quit requested -> delete pending video, homing robot then shutting down")
+                rospy.logwarn("[EvalRunner] quit requested -> delete pending video then shutting down")
                 if self.cfg.record:
                     self._abort_and_delete_video()
-                try:
-                    self.robot.home()
-                except Exception as e:
-                    rospy.logwarn(f"[EvalRunner] home failed on quit: {e}")
+                if not bool(getattr(self.cfg, "debug_no_actuate", False)):
+                    try:
+                        self.robot.home()
+                    except Exception as e:
+                        rospy.logwarn(f"[EvalRunner] home failed on quit: {e}")
                 rospy.signal_shutdown("User quit requested")
                 return
 
@@ -305,8 +414,75 @@ class EvalRunner:
         # start new video for current rollout index (status unknown yet)
         idx = int(self.state.episode_idx)
         self._cur_rollout_status = None
-        self._cur_rollout_video_path = os.path.join(self.video_dir, f"{idx}_pending.mp4")
+        self._cur_rollout_video_path = os.path.join(self.video_dir, f"{idx}_pending.gif")
         self._video.start(self._cur_rollout_video_path)
+
+    def _start_state_trace_for_rollout(self):
+        if not self.cfg.record or self.state_trace_dir is None:
+            return
+        if self._cur_state_trace_path is not None:
+            return
+        idx = int(self.state.episode_idx)
+        self._cur_state_trace_path = os.path.join(self.state_trace_dir, f"{idx}_pending.jsonl")
+        header = {
+            "event": "start",
+            "episode_idx": idx,
+            "task_name": str(self.cfg.task_name),
+            "model_name": str(self.cfg.model_name),
+            "eval_name": str(self.cfg.eval_name),
+            "obs_horizon": int(self.cfg.obs_horizon),
+            "created_wall_time": float(time.time()),
+        }
+        try:
+            with open(self._cur_state_trace_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(header) + "\n")
+        except Exception as e:
+            rospy.logwarn(f"[EvalRunner] failed to start state trace: {e}")
+            self._cur_state_trace_path = None
+
+    def _append_lowdim_state_trace(self, t_obs: float, temporal_obs: Dict[str, Any]):
+        if not self.cfg.record or not self._recording_active:
+            return
+        if self._cur_state_trace_path is None:
+            self._start_state_trace_for_rollout()
+        if self._cur_state_trace_path is None:
+            return
+        low_dim = temporal_obs.get("low_dim", {})
+        payload = {
+            "event": "inference_lowdim",
+            "episode_idx": int(self.state.episode_idx),
+            "infer_step": int(self._infer_steps_in_rollout),
+            "t_obs": float(t_obs),
+            "wall_time": float(time.time()),
+            "low_dim": self._jsonable(low_dim),
+            "latest": self._jsonable(
+                {
+                    key: values[-1]
+                    for key, values in low_dim.items()
+                    if isinstance(values, list) and values
+                }
+            ),
+        }
+        try:
+            with open(self._cur_state_trace_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as e:
+            rospy.logwarn_throttle(2.0, f"[EvalRunner] failed to append state trace: {e}")
+
+    def _start_attention_video_for_rollout(self):
+        if not self.cfg.record:
+            return
+        if self._attention_recording_active:
+            return
+        if not self._recording_active:
+            return
+        if int(self.state.episode_idx) >= int(self.cfg.n_rollouts):
+            return
+
+        idx = int(self.state.episode_idx)
+        self._cur_attention_video_path = os.path.join(self.attention_video_dir, f"{idx}_pending.gif")
+        self._attention_video.start(self._cur_attention_video_path)
+        self._attention_recording_active = True
 
     def _finish_rollout_video(self, status: str):
         # stop writer then rename pending to final name (include success/fail counts)
@@ -317,11 +493,16 @@ class EvalRunner:
 
         # stop writer
         self._video.stop()
+        if self._attention_recording_active:
+            self._attention_video.stop()
+            self._attention_recording_active = False
 
         if self._cur_rollout_video_path is None:
+            self._finish_attention_video(idx, status)
+            self._finish_state_trace(idx, status)
             return
 
-        final_path = os.path.join(self.video_dir, f"{idx}_{status}.mp4")
+        final_path = os.path.join(self.video_dir, f"{idx}_{status}.gif")
         try:
             if os.path.exists(self._cur_rollout_video_path):
                 os.replace(self._cur_rollout_video_path, final_path)
@@ -329,41 +510,39 @@ class EvalRunner:
             rospy.logwarn(f"[EvalRunner] failed to rename video: {e}")
 
         self._cur_rollout_video_path = None
+        self._finish_attention_video(idx, status)
+        self._finish_state_trace(idx, status)
         self._cur_rollout_status = status
 
-    # ---------------- sanity checks ----------------
-    def _in_workspace(self, xyz: np.ndarray) -> bool:
-        xyz = np.asarray(xyz, dtype=np.float32).reshape(3,)
-        mn = np.asarray(self.cfg.workspace_min_xyz, dtype=np.float32).reshape(3,)
-        mx = np.asarray(self.cfg.workspace_max_xyz, dtype=np.float32).reshape(3,)
-        return bool(np.all(xyz >= mn) and np.all(xyz <= mx))
+    def _finish_attention_video(self, idx: int, status: str):
+        if self._cur_attention_video_path is None:
+            return
 
-    def _step_ok(self, a_prev: np.ndarray, a_next: np.ndarray) -> bool:
-        """
-        a_prev, a_next: (10,) actions [xyz,rot6,grip]
-        """
-        a_prev = np.asarray(a_prev, dtype=np.float32).reshape(-1)
-        a_next = np.asarray(a_next, dtype=np.float32).reshape(-1)
+        final_path = os.path.join(self.attention_video_dir, f"{idx}_{status}.gif")
+        try:
+            if os.path.exists(self._cur_attention_video_path):
+                os.replace(self._cur_attention_video_path, final_path)
+        except Exception as e:
+            rospy.logwarn(f"[EvalRunner] failed to rename visualization video: {e}")
 
-        # workspace check for absolute action
-        if not self._in_workspace(a_next[0:3]):
-            rospy.logwarn_throttle(1.0, f"[EvalRunner] action out of workspace xyz={a_next[0:3]}")
-            return False
+        self._cur_attention_video_path = None
+        with self._record_lock:
+            self._latest_attention_frame = None
 
-        # consecutive delta check
-        dp = float(np.linalg.norm(a_next[0:3] - a_prev[0:3], ord=2))
-        Rprev = rot6d_to_R(a_prev[3:9]).reshape(3, 3)
-        Rnext = rot6d_to_R(a_next[3:9]).reshape(3, 3)
-        dr = rotation_angle_between(Rprev, Rnext)
+    def _finish_state_trace(self, idx: int, status: str):
+        if self._cur_state_trace_path is None:
+            return
 
-        if dp > float(self.cfg.max_step_trans):
-            rospy.logwarn_throttle(1.0, f"[EvalRunner] step too large dp={dp:.4f} > {self.cfg.max_step_trans}")
-            return False
-        if dr > float(self.cfg.max_step_rot_rad):
-            rospy.logwarn_throttle(1.0, f"[EvalRunner] rot step too large dr={dr:.4f} > {self.cfg.max_step_rot_rad}")
-            return False
+        final_path = os.path.join(self.state_trace_dir, f"{idx}_{status}.jsonl")
+        try:
+            with open(self._cur_state_trace_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"event": "finish", "status": str(status)}) + "\n")
+            if os.path.exists(self._cur_state_trace_path):
+                os.replace(self._cur_state_trace_path, final_path)
+        except Exception as e:
+            rospy.logwarn(f"[EvalRunner] failed to finish state trace: {e}")
 
-        return True
+        self._cur_state_trace_path = None
 
     # ---------------- evaluator (sync callbacks) ----------------
     def _imgmsg_to_rgb(self, msg: Image) -> Optional[np.ndarray]:
@@ -390,7 +569,7 @@ class EvalRunner:
             "gripper_state": np.asarray([float(gr)], dtype=np.float32),
         }
 
-    def on_light_rgb_set(self, t_cam: float, imgs: Dict[str, Image]):
+    def on_rgb_set(self, t_cam: float, imgs: Dict[str, Image]):
         """
         imgs: dict cam_name -> sensor_msgs/Image
         """
@@ -399,49 +578,13 @@ class EvalRunner:
         if s is None:
             return
 
-        # require all cams in cfg.rgb_cams_light
+        # require all configured RGB cameras
         rgb_dict: Dict[str, np.ndarray] = {}
-        for cam in self.cfg.rgb_cams_light:
+        for cam in self.cfg.rgb_cams:
             msg = imgs.get(cam, None)
             if msg is None:
                 return
             im = self._imgmsg_to_rgb(msg)
-            if im is None:
-                return
-            rgb_dict[cam] = im
-
-        low = self._build_lowdim(s)
-        if low is None:
-            return
-
-        pkt = ObsPacket(
-            t_obs=t_cam,
-            obs={"rgb": rgb_dict, "low_dim": low},
-            allow=True,
-        )
-        self.obs_buf.push(pkt)
-
-        # video: keep latest frame cache regardless of obs horizon usage
-        if self.cfg.record:
-            self._update_latest_record_frame(rgb_dict)
-
-    # TODO: add depth
-    def on_full_rgbd_set(self, t_cam: float, cams_set: Dict[str, Any]):
-        """
-        Optional full sync: cams_set[cam] has .rgb and .depth
-        We still only use rgb cams in cfg.rgb_cams_light for now.
-        """
-        t_cam = float(t_cam)
-        s = self.sample_ring.nearest(t_cam, float(self.cfg.robot_sync.robot_match_window_s))
-        if s is None:
-            return
-
-        rgb_dict: Dict[str, np.ndarray] = {}
-        for cam in self.cfg.rgb_cams_full:
-            cm = cams_set.get(cam, None)
-            if cm is None or getattr(cm, "rgb", None) is None:
-                return
-            im = self._imgmsg_to_rgb(cm.rgb)
             if im is None:
                 return
             rgb_dict[cam] = im
@@ -488,156 +631,6 @@ class EvalRunner:
         }
         return float(latest.t_obs), temporal_obs
 
-    # HARDCODE
-    def _compute_exec_slice(self) -> Tuple[int, int]:
-        Ta = int(self.cfg.pred_horizon)
-        Te = int(self.cfg.exec_horizon)
-
-        start = 1
-        end = min(start + Te, Ta)
-        return start, end
-
-    def _pose_error(self, cur6: np.ndarray, tgt6: np.ndarray) -> Tuple[float, float]:
-        dp = float(np.linalg.norm(cur6[:3] - tgt6[:3], ord=2))
-        dr = float(np.linalg.norm(cur6[3:6] - tgt6[3:6], ord=2))
-        return dp, dr
-
-    def _is_step_done(self, tgt6: np.ndarray) -> bool:
-        st = self.robot.get_state()
-        if st is None or getattr(st, "ee_pose", None) is None:
-            return False
-        cur = np.asarray(st.ee_pose[:6], dtype=np.float32)
-        dp, dr = self._pose_error(cur, tgt6)
-        return (dp <= float(self.cfg.pos_tol_mm)) and (dr <= float(self.cfg.rot_tol_rad))
-
-    def _convert_action_to_robot(self, act: np.ndarray) -> Tuple[np.ndarray, Optional[float]]:
-        """
-        act: [x,y,z, rot6d(6), grip?]
-        xyz unit per cfg.xyz_unit.
-        returns pose6_mm_rpy + optional gripper scalar
-        """
-        act = np.asarray(act, dtype=np.float32).reshape(1, -1)
-        if act.shape[-1] < 9:
-            raise ValueError(f"Expected >=9 dims (xyz+rot6d), got {act.shape[0]}")
-
-        pose6, grip = xyz6g_to_action_abs(act)
-
-        pose6 = np.asarray(pose6, dtype=np.float32).flatten()
-        grip = float(grip.flatten()[0]) if grip is not None else None
-        return pose6.astype(np.float32), grip
-
-    def _send_step_command(self, pose6: np.ndarray, grip: Optional[np.ndarray]):
-        self.robot.move_servo_cart(
-            pose6_mm_rpy=pose6.tolist(),
-            tool_coord=bool(self.cfg.servo_tool_coord),
-        )
-
-        if grip is None:
-            return
-
-        if self.cfg.gripper_binary:
-            gb = 1 if grip > float(self.cfg.gripper_deadband) else 0
-            if self._last_grip_bin is None or gb != self._last_grip_bin:
-                if gb == 1:
-                    self.robot.move_gripper(float(self.cfg.gripper_open_pulse))
-                else:
-                    self.robot.move_gripper(float(self.cfg.gripper_close_pulse))
-                self._last_grip_bin = gb
-        else:
-            self.robot.move_gripper(grip)
-
-    def _execute_step_until_done(self, pose6: np.ndarray, grip: Optional[float]) -> bool:
-        """
-        Stream servo command until reached or timeout.
-        """
-        t0 = self._ros_now()
-        dt = 1.0 / float(self.cfg.control_hz)
-
-        while (self._ros_now() - t0) < float(self.cfg.step_timeout_s):
-            if rospy.is_shutdown() or self._stop or self.state.quit_requested:
-                return False
-            if self.state.reset_requested or (not self.state.running):
-                return False
-
-            self._send_step_command(pose6, grip)
-
-            if self._is_step_done(pose6):
-                return True
-
-            time.sleep(dt)
-
-        return True
-
-    def _execute_chunk(self, chunk_actions: np.ndarray) -> bool:
-        """
-        chunk_actions: (Te, 10) in [xyz, rot6d, grip] predicted by policy (absolute)
-        """
-        dt = 1.0 / float(self.cfg.control_hz)
-        N_interp = self.cfg.interp_steps
-        grip_mode = self.cfg.gripper_interp_mode
-
-        acts = np.asarray(chunk_actions, dtype=np.float32)
-        if acts.ndim != 2 or acts.shape[1] < 10:
-            rospy.logwarn(f"[EvalRunner] bad chunk_actions shape={acts.shape}")
-            return False
-        if acts.shape[0] == 0:
-            return True
-
-        # --- Build smoothed action sequence ---
-        exec_actions = []
-        
-        first = acts[0, :10].copy()
-
-        # bridge from last executed action to first action of this chunk
-        if self._last_exec_action10 is not None:
-            bridge = se3_interp_xyz_rot6(self._last_exec_action10, first, n=N_interp, grip_mode=grip_mode)
-            exec_actions.append(bridge)
-
-        # interpolate within chunk
-        for i in range(acts.shape[0] - 1):
-            a0 = acts[i, :10]
-            a1 = acts[i + 1, :10]
-            seg = se3_interp_xyz_rot6(a0, a1, n=N_interp, grip_mode=grip_mode)
-            exec_actions.append(seg)
-
-        # include final point (one step)
-        exec_actions.append(acts[-1:, :10])
-        exec_actions = np.concatenate(exec_actions, axis=0).astype(np.float32)  # (N,10)
-
-        # --- Sanity checks ---
-        for j in range(exec_actions.shape[0]):
-            if not self._in_workspace(exec_actions[j, 0:3]):
-                rospy.logwarn(f"[EvalRunner] abort: action[{j}] xyz out of workspace: {exec_actions[j,0:3]}")
-                return False
-
-        prev = self._last_exec_action10 if self._last_exec_action10 is not None else exec_actions[0]
-        for j in range(exec_actions.shape[0]):
-            cur = exec_actions[j]
-            if not self._step_ok(prev, cur):
-                rospy.logwarn(f"[EvalRunner] abort: step check failed at j={j}")
-                return False
-            prev = cur
-
-        # --- Stream execution ---
-        for j in range(exec_actions.shape[0]):
-            if rospy.is_shutdown() or self._stop or self.state.quit_requested:
-                return False
-            if self.state.reset_requested or (not self.state.running):
-                return False
-
-            act10 = exec_actions[j]
-            pose6, grip = self._convert_action_to_robot(act10)
-            # # TODO: avoid frequent gripper command, fix this with better handling
-            if grip is not None and grip <= 100:
-                grip = None
-                
-            self._send_step_command(pose6, grip)
-
-            self._last_exec_action10 = act10.copy()
-            time.sleep(dt)
-
-        return True
-
     def _do_reset(self):
         """
         Reset behavior: stop runner, clear buffers, optionally home robot.
@@ -649,17 +642,17 @@ class EvalRunner:
             self._abort_and_delete_video()
 
         self.obs_buf.clear()
-        self._last_grip_bin = None
+        self.action_executor.reset()
         self.state.running = False
         self.state.continue_requested = False
         self.state.reset_requested = False
-        self._last_exec_action10 = None
         self._infer_steps_in_rollout = 0
 
-        try:
-            self.robot.home()
-        except Exception as e:
-            rospy.logwarn(f"[EvalRunner] home_robot failed: {e}")
+        if not bool(getattr(self.cfg, "debug_no_actuate", False)):
+            try:
+                self.robot.home()
+            except Exception as e:
+                rospy.logwarn(f"[EvalRunner] home_robot failed: {e}")
 
     def _control_loop(self):
         rate = rospy.Rate(float(self.cfg.control_hz))
@@ -690,10 +683,11 @@ class EvalRunner:
 
             if int(self.state.episode_idx) >= int(self.cfg.n_rollouts):
                 rospy.logwarn("[EvalRunner] completed all rollouts -> finalizing and shutting down")
-                try:
-                    self.robot.home()
-                except Exception as e:
-                    rospy.logwarn(f"[EvalRunner] home failed at end: {e}")
+                if not bool(getattr(self.cfg, "debug_no_actuate", False)):
+                    try:
+                        self.robot.home()
+                    except Exception as e:
+                        rospy.logwarn(f"[EvalRunner] home failed at end: {e}")
                 self._finalize_results_file()
                 rospy.signal_shutdown("Finished all rollouts")
                 return
@@ -709,6 +703,16 @@ class EvalRunner:
 
             acts = self.net.infer_action(temporal_obs)
             self._infer_steps_in_rollout += 1
+            self._append_lowdim_state_trace(t_obs, temporal_obs)
+            self._render_inference_viz(temporal_obs, acts)
+
+            if bool(getattr(self.cfg, "debug_no_actuate", False)):
+                rospy.loginfo_throttle(
+                    1.0,
+                    "[EvalRunner] debug_no_actuate=True; skipping robot command execution",
+                )
+                rate.sleep()
+                continue
 
             if int(self._infer_steps_in_rollout) >= int(self.cfg.horizon):
                 rospy.logwarn(f"[EvalRunner] rollout horizon reached ({self.cfg.horizon}) -> auto FAIL")
@@ -733,11 +737,15 @@ class EvalRunner:
             if acts.ndim == 1:
                 acts = acts[None, :]
 
-            s_idx, e_idx = self._compute_exec_slice()
+            s_idx, e_idx = self.action_executor.compute_exec_slice()
             chunk = acts[s_idx:e_idx]
 
             rospy.loginfo(f"[EvalRunner] executing chunk: idx [{s_idx}:{e_idx}] shape={chunk.shape}")
-            ok = self._execute_chunk(chunk)
+            ok = self.action_executor.execute_chunk(chunk)
             rospy.loginfo(f"[EvalRunner] chunk done ok={ok}")
+            if not ok:
+                rospy.logwarn("[EvalRunner] safety abort during chunk execution; pausing policy")
+                self.state.running = False
+                self.state.continue_requested = False
 
             rate.sleep()

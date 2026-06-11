@@ -3,9 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from scipy.spatial.transform import Rotation as R, Slerp
-from typing import Any, Dict, List, Tuple, Optional, Callable
+from typing import Tuple
 import cv2
-import torch
 import numpy as np
 
 # --------------------------- pose6 <-> SE(3) ---------------------------
@@ -29,7 +28,6 @@ def rot6d_to_R(R6: np.ndarray) -> np.ndarray:
     b2 = a2 - dot * b1
     b2 = b2 / np.linalg.norm(b2, axis=1, keepdims=True)
 
-    # third vector by right-hand rule
     b3 = np.cross(b1, b2, axis=1)
 
     Rm = np.stack([b1, b2, b3], axis=-1)  # [N,3,3]
@@ -63,12 +61,12 @@ def rpy_to_R_xyz(rpy: np.ndarray) -> np.ndarray:
 def pose6_to_xyz6(pose6: np.ndarray) -> np.ndarray:
     """
     pose6: [T,6] = [x(mm),y(mm),z(mm), roll, pitch, yaw]
-    return: [T,12] = [x,y,z, R_flat(9)]
+    return: xyz [T,3], rot6d [T,6] using first two rotation columns
     """
     T = pose6.shape[0]
     xyz = pose6[:, :3]
     Rm = np.stack([rpy_to_R_xyz(pose6[i, 3:6]) for i in range(T)], axis=0)  # [T,3,3]
-    R6 = Rm.reshape(T, 9)[:, :6]
+    R6 = R_to_rot6d(Rm)
     return xyz, R6
 
 def xyz6_to_pose6(xyz6: np.ndarray) -> np.ndarray:
@@ -86,9 +84,9 @@ def xyz6_to_pose6(xyz6: np.ndarray) -> np.ndarray:
 def action_abs_to_xyz6g(tgt_pose6: np.ndarray, tgt_grip: np.ndarray) -> np.ndarray:
     """
     tgt_pose6: [T,6], tgt_grip: [T]
-    return: [T,13] = [x,y,z, R_flat(9), grip]
+    return: [T,10] = [x,y,z, rot6d(6), grip]
     """
-    xyz, R6 = pose6_to_xyz6(tgt_pose6)  # [T,12]
+    xyz, R6 = pose6_to_xyz6(tgt_pose6)
     xyz6 = np.concatenate([xyz, R6], axis=1)
     g = tgt_grip.reshape(-1, 1)
     return np.concatenate([xyz6, g], axis=1)
@@ -150,56 +148,131 @@ def rotation_angle_between(Ra: np.ndarray, Rb: np.ndarray) -> float:
 
 # ------------------------ image preprocessing ------------------------
 
-# def center_square_crop(img_bgr: np.ndarray) -> np.ndarray:
-#     h, w = img_bgr.shape[:2]
-#     s = min(h, w)
-#     y0 = (h - s) // 2
-#     x0 = (w - s) // 2
-#     return img_bgr[y0:y0 + s, x0:x0 + s]
+REAL_FRONT_CROP_RATIO = 0.8
 
-def center_square_crop(img_bgr: np.ndarray, camera_name: str, front_crop_ratio=0.8) -> np.ndarray:
-    h, w = img_bgr.shape[:2]
+
+@dataclass(frozen=True)
+class CameraImageGeometry:
+    crop_x: int
+    crop_y: int
+    crop_width: int
+    crop_height: int
+    pad_left: int = 0
+    pad_top: int = 0
+    pad_right: int = 0
+    pad_bottom: int = 0
+
+
+def camera_image_geometry(
+    camera_name: str,
+    src_width: int,
+    src_height: int,
+    *,
+    front_crop_ratio: float = REAL_FRONT_CROP_RATIO,
+    square_crop: bool = True,
+) -> CameraImageGeometry:
+    src_width = int(src_width)
+    src_height = int(src_height)
+    if src_width <= 0 or src_height <= 0:
+        raise ValueError(f"invalid image size: width={src_width}, height={src_height}")
+
+    camera_name = str(camera_name)
+    if camera_name == "d435i_front":
+        crop_size = max(1, int(min(src_width, src_height) * float(front_crop_ratio)))
+        x0 = int(round((float(src_width) - float(crop_size)) * 0.5))
+        y0 = int(src_height - crop_size)
+        return CameraImageGeometry(
+            crop_x=max(0, x0),
+            crop_y=max(0, y0),
+            crop_width=crop_size,
+            crop_height=crop_size,
+        )
 
     if camera_name == "d405":
-        # Pad on TOP with black so height == width
-        if h < w:
-            pad = w - h
-            top_pad = pad
-            bottom_pad = 0
-        else:
-            top_pad = 0
-            bottom_pad = 0  # already square or tall
-
-        img_padded = cv2.copyMakeBorder(
-            img_bgr,
-            top=top_pad,
-            bottom=bottom_pad,
-            left=0,
-            right=0,
-            borderType=cv2.BORDER_CONSTANT,
-            value=(0, 0, 0),  # black
+        return CameraImageGeometry(
+            crop_x=0,
+            crop_y=0,
+            crop_width=src_width,
+            crop_height=src_height,
+            pad_top=max(0, src_width - src_height),
         )
-        return img_padded
 
-    elif camera_name == "d435i_front":
-        # center crop for frontview
-        s = min(h, w)
-        cx, cy = h // 2, w // 2
-        img_length = int(s * front_crop_ratio)
-        return img_bgr[h - img_length : h, cy - img_length // 2 : cy + img_length // 2]
+    if square_crop:
+        crop_size = min(src_width, src_height)
+        return CameraImageGeometry(
+            crop_x=max(0, (src_width - crop_size) // 2),
+            crop_y=max(0, (src_height - crop_size) // 2),
+            crop_width=crop_size,
+            crop_height=crop_size,
+        )
 
-    else:
-        raise NotImplementedError(f"unknown camera name: {camera_name}")
+    return CameraImageGeometry(
+        crop_x=0,
+        crop_y=0,
+        crop_width=src_width,
+        crop_height=src_height,
+    )
 
-# ------------------------ cuda ------------------------
-def dict_apply(
-        x: Dict[str, torch.Tensor], 
-        func: Callable[[torch.Tensor], torch.Tensor]
-        ) -> Dict[str, torch.Tensor]:
-    result = dict()
-    for key, value in x.items():
-        if isinstance(value, dict):
-            result[key] = dict_apply(value, func)
-        else:
-            result[key] = func(value)
-    return result
+
+def center_square_crop(
+    img_bgr: np.ndarray,
+    camera_name: str,
+    front_crop_ratio: float = REAL_FRONT_CROP_RATIO,
+) -> np.ndarray:
+    h, w = img_bgr.shape[:2]
+    geom = camera_image_geometry(
+        camera_name=camera_name,
+        src_width=w,
+        src_height=h,
+        front_crop_ratio=front_crop_ratio,
+        square_crop=True,
+    )
+    cropped = img_bgr[
+        geom.crop_y : geom.crop_y + geom.crop_height,
+        geom.crop_x : geom.crop_x + geom.crop_width,
+    ]
+    if geom.pad_left or geom.pad_top or geom.pad_right or geom.pad_bottom:
+        cropped = cv2.copyMakeBorder(
+            cropped,
+            top=geom.pad_top,
+            bottom=geom.pad_bottom,
+            left=geom.pad_left,
+            right=geom.pad_right,
+            borderType=cv2.BORDER_CONSTANT,
+            value=(0, 0, 0),
+        )
+    return cropped
+
+
+def adjust_intrinsics_for_image_geometry(
+    K: np.ndarray,
+    *,
+    camera_name: str,
+    src_width: int,
+    src_height: int,
+    image_size: int,
+    square_crop: bool = True,
+    front_crop_ratio: float = REAL_FRONT_CROP_RATIO,
+) -> np.ndarray:
+    geom = camera_image_geometry(
+        camera_name=camera_name,
+        src_width=int(src_width),
+        src_height=int(src_height),
+        front_crop_ratio=float(front_crop_ratio),
+        square_crop=bool(square_crop),
+    )
+    K = np.asarray(K, dtype=np.float32).copy()
+
+    K[0, 2] = K[0, 2] - float(geom.crop_x) + float(geom.pad_left)
+    K[1, 2] = K[1, 2] - float(geom.crop_y) + float(geom.pad_top)
+
+    padded_width = geom.crop_width + geom.pad_left + geom.pad_right
+    padded_height = geom.crop_height + geom.pad_top + geom.pad_bottom
+    sx = float(image_size) / float(padded_width)
+    sy = float(image_size) / float(padded_height)
+
+    K[0, 0] *= sx
+    K[0, 2] *= sx
+    K[1, 1] *= sy
+    K[1, 2] *= sy
+    return K

@@ -22,7 +22,7 @@ class TeleopConfig:
         "roslaunch",
         "xarm_bringup",
         "xarm7_server.launch",
-        "robot_ip:=192.168.1.241",
+        "robot_ip:=192.168.1.243",
         "report_type:=dev",
         "add_gripper:=true",
     ])
@@ -89,6 +89,7 @@ class TeleopConfig:
     grip_speed: float = 0.2
     grip_close_from_index: bool = True
     grip_open_from_middle: bool = True
+    grip_input_deadband: float = 0.08
 
     # Haptics
     enable_haptics: bool = True

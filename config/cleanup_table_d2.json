@@ -1,17 +1,18 @@
 {
   "dataset": {
     "root_dir": "../../data",
-    "task": "cleanup_table_d2",
+    "task": "cleanup_table_d2_fixed",
     "robot": "xarm7",
     "gripper": "xarm_gripper",
     "description": "Clean up the table.",
     "num_demos": 100,
+    "collection_freq_hz": 10,
 
     "demo_id_start": 0,
     "demo_prefix": "episode_",
     "random_start": false,
     "operator": "Ruiyu",
-    "notes": "Quest+XArm, D405+D435i+D435i, launch all sensors"
+    "notes": "Quest+XArm, D405+D435i, launch all sensors"
   },
 
   "calibration": {

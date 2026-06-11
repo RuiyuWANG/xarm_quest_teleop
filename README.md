@@ -185,3 +185,150 @@
    roscore
    ```
 3. Run Scripts
+
+   The sections above are the hardware and ROS interface reference. Keep them as
+   the source of truth for Docker, Quest, xArm, RealSense, and ROS topic/service
+   bringup. The commands below are the current RGB-only real experiment loop.
+
+   When launching Python `rospy` scripts directly, pass private params as
+   `_param:=value`.
+
+## Current Real Experiment Loop
+
+### 1. Collect Demonstrations
+
+From the ROS container, after sourcing ROS and the catkin workspace:
+
+```bash
+cd /root/catkin_ws/src/real_ws/CloudGripper_Manipulation
+python3 src/scripts/run_data_collection.py _dataset_json:=cleanup_table_d2.json
+```
+
+This writes raw collector data under:
+
+```text
+/root/catkin_ws/src/real_ws/data/cleanup_table_d2/
+```
+
+Key files/directories:
+
+- `task_meta.json`: collection metadata and calibration snapshot
+- `rgb/episode_*/`: RGB-only episodes used by the current real policy path
+- `all_sensors/episode_*/`: optional full sensor stream, currently not used by eval
+
+### 2. Convert Raw Data To Cache
+
+```bash
+cd /root/catkin_ws/src/real_ws
+python3 CloudGripper_Manipulation/src/scripts/convert_raw_data_to_cache.py --task-dir data/cleanup_table_d2 --out-dir data/cleanup_table_d2/rgb_lmdb --stream rgb --overwrite
+```
+
+The current cache contract is:
+
+```text
+data/cleanup_table_d2/rgb_lmdb/
+  images.lmdb
+  arrays.npz
+  meta.json
+  build_done.flag
+```
+
+Current action convention:
+
+```text
+action/absolute_action: [x_mm,y_mm,z_mm,rot6d_first_two_columns,gripper]
+```
+
+Delta actions are intentionally disabled in the converter and are not part of
+the current real rollout path.
+
+### 3. Train RVT2 Visual Focus
+
+```bash
+cd /root/catkin_ws/src/real_ws/seeker-dev
+PYTHONPATH=$PWD seeker train --config-name=train_visual_focus_rvt2_real task_name=cleanup_table_d2 dataset_path=../data/cleanup_table_d2/rgb_lmdb seed=0 background_overlay.enabled=true background_overlay.background_path=.weights/backgrounds_224.pt
+```
+
+The RVT2 focus checkpoint is written to:
+
+```text
+seeker-dev/experiments/cleanup_table_d2/rvt2_real/demos-all_seed-0/latest.pt
+```
+
+Copy it to the path expected by the real RVT2 policy config:
+
+```bash
+cp experiments/cleanup_table_d2/rvt2_real/demos-all_seed-0/latest.pt .weights/rvt2_real_cleanup_table_d2.pt
+```
+
+### 4. Train Real Policy
+
+```bash
+cd /root/catkin_ws/src/real_ws/seeker-dev
+PYTHONPATH=$PWD seeker train --config-name=train_focus_policy_rvt2_real task_name=cleanup_table_d2 dataset_path=../data/cleanup_table_d2/rgb_lmdb seed=0
+```
+
+The default policy checkpoint path is:
+
+```text
+seeker-dev/experiments/cleanup_table_d2/real_policy/real_rvt2_cleanup_table_d2_seed_0/checkpoints/latest.ckpt
+```
+
+### 5. Dry-Run Eval With Live Viz
+
+Start with no actuation:
+
+```bash
+cd /root/catkin_ws/src/real_ws/CloudGripper_Manipulation
+python3 src/scripts/run_policy_eval.py
+```
+
+Press `c` to start inference. The dry-run config enables live inference
+visualization with `live_viz: true`. Disable that field when running headless.
+Eval outputs are grouped by `eval_name`, for example
+`evaluation/cleanup_table_d2/real_rvt2_dry_run/in-domain/`.
+
+### 6. Real Rollout
+
+After dry-run overlays and action sanity checks look correct, run with actuation:
+
+```bash
+cd /root/catkin_ws/src/real_ws/CloudGripper_Manipulation
+python3 src/scripts/run_policy_eval.py _config:=cleanup_table_d2_rollout.yaml
+```
+
+Eval configs are resolved from `config/eval/` by default. The default config is
+`cleanup_table_d2_dry_run.yaml`, so the bare command is safe and does not
+actuate. Edit the eval YAML to switch checkpoints, task names, model names,
+calibration files, rollout count, or logging location. `run_policy_eval.py`
+only reads `_config:=...` from the terminal; individual eval fields should live
+in the YAML.
+
+Eval profiles:
+
+- `profile: dry_run`: no actuation, debug overlays on, recording off
+- `profile: rollout`: actuation on, debug overlays on, recording on
+- `profile: manual`: use explicit YAML values without profile defaults
+
+Keyboard controls:
+
+- `c`: start/continue
+- `p`: pause
+- `r`: reset
+- `s`: mark success
+- `f`: mark fail
+- `q`: quit
+
+## Runtime Ownership
+
+- The existing ROS setup sections own Docker, Quest, xArm, RealSense, topics,
+  services, and manual bringup checks.
+- Current collection/eval scripts auto-launch RGB-only cameras from
+  `src/configs/collector_config.py` unless auto-launch is disabled.
+- `CloudGripper_Manipulation/config/*.json` seeds task collection metadata.
+- `CloudGripper_Manipulation/all_cams_calib.json` is the preferred eval/debug
+  projection calibration source.
+- The policy checkpoint owns policy architecture, image size, observation
+  horizon, action horizon, task embedding, and focus source.
+- Real eval owns ROS topics, camera launch, robot sync, safety thresholds,
+  interpolation, gripper behavior, logging, and debug overlays.

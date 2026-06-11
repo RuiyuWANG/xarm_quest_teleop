@@ -1,0 +1,13 @@
+eval_name: background
+
+profile: rollout
+ckpt: seeker-dev/experiments/cleanup_table_d2/real_stage_pooled/real_stage_pooled_focus_refine_cleanup_table_d2_iters-3_attnprior-w0.0002-sig1.3_decay-5k_seed_100/checkpoints/latest.ckpt
+task: cleanup_table_d2
+name: real_fousepool_policy
+calib: all_cams_calib.json
+result_log_dir: evaluation/
+seed: 0
+n_rollouts: 20
+horizon: 1000
+exec_horizon: 6
+live_viz: true

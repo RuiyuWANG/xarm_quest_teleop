@@ -75,15 +75,8 @@ REALSENSE_CMDS: Dict[str, List[str]] = {
     "d435i_front": [
         "roslaunch", "realsense2_camera", "rs_camera.launch",
         "serial_no:=335522071488", "camera:=d435i_front",
-        "enable_color:=true", "enable_depth:=true",
-        "enable_gyro:=false", "enable_accel:=false",
-        "filters:=",
-    ],
-    "d435i_shoulder": [
-        "roslaunch", "realsense2_camera", "rs_camera.launch",
-        "serial_no:=233522073481", "camera:=d435i_shoulder",
-        "enable_color:=true", "enable_depth:=true",
-        "enable_gyro:=false", "enable_accel:=false",
+        "enable_color:=true", "enable_depth:=false",
+        "enable_gyro:=false", "enable_accel:=true",
         "filters:=",
     ],
 }
@@ -97,11 +90,7 @@ CAMERA_TOPICS: Dict[str, Dict[str, str]] = {
     "d435i_front": {
         "image": "/d435i_front/color/image_raw",
         "info": "/d435i_front/color/camera_info",
-    },
-    "d435i_shoulder": {
-        "image": "/d435i_shoulder/color/image_raw",
-        "info": "/d435i_shoulder/color/camera_info",
-    },
+    }
 }
 
 
@@ -657,8 +646,8 @@ class HandEyeCalibrator:
 def main():
     rospy.init_node("handeye_charuco_calibration", anonymous=False)
 
-    camera_name = rospy.get_param("~camera_name", "d405")
-    setup = rospy.get_param("~setup", "eye_to_hand")  # eye_to_hand | eye_in_hand
+    camera_name = rospy.get_param("~camera_name", "d405")  # d405 | d435i_front
+    setup = rospy.get_param("~setup", "eye_in_hand")  # eye_to_hand | eye_in_hand
 
     if camera_name not in CAMERA_TOPICS:
         rospy.logerr(f"[main] unknown camera_name={camera_name}, allowed={list(CAMERA_TOPICS.keys())}")
@@ -666,6 +655,11 @@ def main():
     if setup not in ("eye_to_hand", "eye_in_hand"):
         rospy.logerr("[main] ~setup must be 'eye_to_hand' or 'eye_in_hand'")
         raise SystemExit(1)
+    
+    if "front" in camera_name:
+        assert setup == "eye_to_hand", "front cameras should use eye_to_hand setup with board fixed on table"
+    if "d405" in camera_name:
+        assert setup == "eye_in_hand", "EiH cameras should use eye_in_hand setup with board holded by gripper"
 
     teleop_cfg = TeleopConfig()
     services = XArmServices()

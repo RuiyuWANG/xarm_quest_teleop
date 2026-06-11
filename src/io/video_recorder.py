@@ -10,7 +10,7 @@ class AsyncVideoWriter:
     Non-blocking video writer:
       - control loop calls enqueue(frame_rgb_uint8)
       - writer thread does encoding/IO
-    Uses imageio-ffmpeg if available.
+    Uses imageio/ffmpeg or Pillow based on the output extension.
     """
     def __init__(self, fps: float = 20.0):
         self.fps = float(fps)
@@ -27,16 +27,19 @@ class AsyncVideoWriter:
         self._running = True
 
         def _worker():
+            if str(self._path).lower().endswith(".gif"):
+                self._write_gif_worker()
+                return
+
             try:
                 import imageio.v2 as imageio
-                # codec chosen by ffmpeg; mp4 container
                 self._writer = imageio.get_writer(self._path, fps=self.fps)
-            except Exception as e:
+            except Exception:
                 self._writer = None
                 self._running = False
                 return
 
-            while self._running:
+            while True:
                 item = self._q.get()
                 if item is None:
                     break
@@ -53,6 +56,37 @@ class AsyncVideoWriter:
 
         self._thread = threading.Thread(target=_worker, daemon=True)
         self._thread.start()
+
+    def _write_gif_worker(self):
+        try:
+            from PIL import Image
+        except Exception:
+            self._running = False
+            return
+
+        frames = []
+        while True:
+            item = self._q.get()
+            if item is None:
+                break
+            try:
+                frames.append(Image.fromarray(item.astype(np.uint8, copy=False)))
+            except Exception:
+                pass
+
+        if frames:
+            duration_ms = int(round(1000.0 / max(1.0, self.fps)))
+            try:
+                frames[0].save(
+                    self._path,
+                    save_all=True,
+                    append_images=frames[1:],
+                    duration=duration_ms,
+                    loop=0,
+                )
+            except Exception:
+                pass
+        self._running = False
 
     def enqueue(self, frame_rgb_uint8: np.ndarray):
         if not self._running:

@@ -2,25 +2,36 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
+import copy
+from pathlib import Path
+from typing import Any, Optional
 
 import numpy as np
 import torch
 import random
-import cv2
 
 import hydra
 import dill
+from omegaconf import OmegaConf
 
-from attention_seeker.workspace.base_workspace import BaseWorkspace
-from attention_seeker.util.task_embedding import (
+from seeker.workspace.base_workspace import BaseWorkspace
+from seeker import REPO_ROOT
+from seeker.dataset.cache import load_metadata
+from seeker.util.formatting import pretty_print_nested
+from seeker.util.task_meta import (
     setup_task_embedding_cache,
     instruction_to_task_embedding,
+    instruction_to_task_language_tokens,
 )
 
 from src.policy.network_base import NetBase
-from src.utils.conversion_utils import dict_apply, pose6_to_xyz6, center_square_crop
+from src.policy.seeker_preprocessing import (
+    REAL_POLICY_IMAGE_SIZE,
+    REAL_POLICY_ROT_DIM,
+    preprocess_real_obs_for_policy,
+    task_name_to_instruction,
+)
+from src.utils.tree_utils import dict_apply
 
 default_shape_meta = {
     "obs": {
@@ -68,147 +79,387 @@ eval_shape_meta = {
     }
 }
 
-TASK_DICT = {
-    "real_pick_place_veggis_d1": "Pick up he purple toy eggplant and place it in the brown box.",
-    "cleanup_table_d2": "Clean up the table.",
-    "three_piece_toy_d2": "Insert the three stamps in the holder.",
-    "coffee_transport_d1": "Transport the coffee beans from the bowl to the cup.",
-    "three_piece_toy_d1": "Insert the three stamps in the holder.",
-}
-
-def try_task_embedding(task_descriptions: List[str]) -> Optional[np.ndarray]:
+def try_task_embedding(task_description: str) -> Optional[np.ndarray]:
     """
     Returns: [N, D] float32 if available, else None.
     """
     print("Loading task embeddings...")
     setup_task_embedding_cache()
-    emb = instruction_to_task_embedding(task_descriptions)
+    emb = instruction_to_task_embedding(task_description)
     emb = emb.cpu().numpy().astype(np.float32)
-    return emb
+    return _normalize_task_embedding(emb)
+
+
+def _normalize_task_embedding(emb: np.ndarray) -> np.ndarray:
+    emb = np.asarray(emb, dtype=np.float32)
+    emb = np.squeeze(emb)
+    if emb.ndim == 1:
+        return emb[None, :]
+    if emb.ndim == 2:
+        return emb
+    raise ValueError(f"Expected task embedding [D] or [N,D], got {emb.shape}")
+
+
+def try_task_language_tokens(task_description: str) -> Optional[np.ndarray]:
+    print("Loading task language token embeddings...")
+    setup_task_embedding_cache()
+    tokens = instruction_to_task_language_tokens(task_description)
+    return _normalize_task_language_tokens(tokens.cpu().numpy().astype(np.float32))
+
+
+def _normalize_task_language_tokens(tokens: np.ndarray) -> np.ndarray:
+    tokens = np.asarray(tokens, dtype=np.float32)
+    tokens = np.squeeze(tokens)
+    if tokens.ndim != 2:
+        raise ValueError(f"Expected task language tokens [77,D], got {tokens.shape}")
+    if tokens.shape[0] == 77:
+        return tokens
+    if tokens.shape[1] == 77:
+        return tokens.T.copy()
+    raise ValueError(f"Expected task language tokens with sequence length 77, got {tokens.shape}")
+
+
+def _truthy(value) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _compact_steps(steps: int) -> str:
+    steps = int(steps)
+    if steps % 1000 == 0:
+        return f"{steps // 1000}k"
+    if steps > 1000:
+        return f"{steps / 1000:g}k"
+    return str(steps)
+
+
+def _attn_prior_suffix(enabled, weight, sigma, decay_steps) -> str:
+    if not _truthy(enabled):
+        return ""
+    decay = int(decay_steps)
+    decay_part = f"_decay-{_compact_steps(decay)}" if decay > 0 else ""
+    return f"_attnprior-w{float(weight):g}-sig{float(sigma):g}{decay_part}"
+
+
+def _register_checkpoint_resolvers() -> None:
+    resolvers = {
+        "eval": eval,
+        "add_int": lambda a, b: int(a) + int(b),
+        "divide": lambda a, b: float(a) / float(b),
+        "get_max_steps": lambda task_name: {
+            "square_d0": 400,
+            "stack_d1": 400,
+            "stack_three_d1": 400,
+            "square_d2": 400,
+            "threading_d2": 400,
+            "coffee_d2": 400,
+            "three_piece_assembly_d2": 500,
+            "hammer_cleanup_d1": 500,
+            "mug_cleanup_d1": 500,
+            "kitchen_d1": 800,
+            "nut_assembly_d0": 500,
+            "pick_place_d0": 1000,
+            "coffee_preparation_d1": 800,
+            "tool_hang": 700,
+            "can": 400,
+            "lift": 400,
+            "square": 400,
+        }.get(str(task_name), 800),
+        "demo_label": lambda n_demo: "all" if n_demo is None else str(n_demo),
+        "focus_refine_iters_suffix": lambda pooling, iters: (
+            f"_iters-{int(iters)}" if str(pooling) == "focus_refine" else ""
+        ),
+        "attn_prior_suffix": _attn_prior_suffix,
+        "overlay_suffix": lambda enabled: "_overlay" if _truthy(enabled) else "",
+        "no_eih_suffix": lambda enabled: "" if _truthy(enabled) else "_no_eih",
+        "no_eih_tag": lambda enabled: "" if _truthy(enabled) else "no_eih",
+        "overlay_prob": lambda enabled, prob: (
+            float(prob) if _truthy(enabled) else 0.0
+        ),
+    }
+    for name, resolver in resolvers.items():
+        OmegaConf.register_new_resolver(name, resolver, replace=True)
 
 
 class SeekerPolicy(NetBase):
     def __init__(self, ckpt_path: str, seed: int, device: str = "cuda"):
         super().__init__(ckpt_path, device)
+        self.n_obs_steps = int(getattr(self.policy, "n_obs_steps", 1))
+        self.n_action_steps = int(getattr(self.policy, "n_action_steps", 1))
+        self.pred_horizon = int(getattr(self.policy, "horizon", self.n_action_steps))
         
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
         
-        self.task_embedding = try_task_embedding(TASK_DICT[self.cfg.task_name]).astype(np.float32)
-    
+        self.task_name = str(self._cfg_select("task_name", "unknown"))
+        self.task_embedding, self.task_language_tokens = self._load_task_context()
+        self.robot_id = 0
+        self.last_visual_focus_records = []
+        self._print_eval_preprocessing_summary()
+
     def load_model(self, ckpt_path):
-        payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill)
+        _register_checkpoint_resolvers()
+        with open(ckpt_path, "rb") as f:
+            payload = torch.load(
+                f,
+                pickle_module=dill,
+                map_location=self.device,
+            )
+        if "cfg" not in payload:
+            raise KeyError(f"Checkpoint is missing payload['cfg']: {ckpt_path}")
+
         cfg = payload["cfg"]
+        if not OmegaConf.is_config(cfg):
+            cfg = OmegaConf.create(cfg)
+        try:
+            OmegaConf.resolve(cfg)
+        except Exception as exc:
+            print(f"[SeekerPolicy] warning: could not fully resolve checkpoint cfg: {exc}")
+
+        self._resolve_relative_weight_paths(cfg)
         cls = hydra.utils.get_class(cfg._target_)
         workspace = cls(cfg, output_dir=None)
         workspace: BaseWorkspace
-        print(payload.keys())
         workspace.load_payload(payload, exclude_keys=None, include_keys=None)
 
-        print(f"Action mode: {cfg.action_mode}")
         policy = workspace.model
         if getattr(cfg.training, "use_ema", False):
             policy = workspace.ema_model
+
+        self._print_loaded_runtime_config(policy, cfg, ckpt_path)
             
         self.cfg = cfg
         return policy
-    
-    def format_policy_input(self, obs_dict):
-        """
-        Returns a dict matching the policy obs keys:
-          - agentview_image:            (T, 3, H, W) float32 in [0,1]
-          - robot0_eye_in_hand_image:   (T, 3, H, W) float32 in [0,1]
-          - robot0_eef_pos:             (T, 3) float32   (mm)
-          - robot0_eef_rot:             (T, 6) float32   (flattened R[:6])
-          - robot0_gripper_qpos:        (T, 2) float32   ([g/2, -g/2])
-        """
-        
-        if "rgb" not in obs_dict or "low_dim" not in obs_dict:
-            raise ValueError(f"Unknown obs_dict format. Keys={list(obs_dict.keys())}")
 
-        rgb = obs_dict["rgb"]
-        low = obs_dict["low_dim"]
+    def _cfg_select(self, key: str, default: Any = None) -> Any:
+        try:
+            value = OmegaConf.select(self.cfg, key, default=default)
+        except Exception:
+            value = default
+        return default if value is None else value
 
-        # ---- camera mapping (adjust to your actual keys) ----
-        cam_map = {
-            "d435i_front": "agentview_image",
-            "d405": "robot0_eye_in_hand_image",
+    def _print_loaded_runtime_config(self, policy, cfg, ckpt_path: str) -> None:
+        if hasattr(policy, "get_runtime_config"):
+            runtime_cfg = copy.deepcopy(policy.get_runtime_config())
+        else:
+            runtime_cfg = {}
+        runtime_cfg["Checkpoint"] = {
+            "Path": os.path.abspath(os.path.expanduser(str(ckpt_path))),
+            "Config Source": "checkpoint payload cfg",
+            "Task": OmegaConf.select(cfg, "task_name", default="unknown"),
+            "Dataset": OmegaConf.select(cfg, "dataset_path", default=None),
+            "EMA": bool(OmegaConf.select(cfg, "training.use_ema", default=False)),
         }
+        pretty_print_nested(
+            runtime_cfg,
+            title="Loaded Checkpoint Runtime Configuration",
+            pad_before=True,
+            pad_after=True,
+        )
 
-        # infer T
-        some_cam = next(iter(rgb.keys()))
-        T = len(rgb[some_cam])
+    def _resolve_relative_weight_paths(self, cfg) -> None:
+        try:
+            source = cfg.policy.obs_encoder.focus_view_transform.source
+        except Exception:
+            return
+        for key in ("checkpoint", "weights"):
+            path = source.get(key, None) if hasattr(source, "get") else None
+            if not path:
+                continue
+            path = str(path)
+            if os.path.isabs(path):
+                continue
+            repo_path = os.path.join(str(REPO_ROOT), path)
+            if os.path.exists(repo_path):
+                source[key] = repo_path
+
+    def _resolve_checkpoint_path(self, path_value: Any) -> Optional[Path]:
+        if path_value is None:
+            return None
+        path = Path(str(path_value)).expanduser()
+        if not path.is_absolute():
+            path = Path(REPO_ROOT) / path
+        return path.resolve()
+
+    def _checkpoint_cache_dir(self) -> Optional[Path]:
+        cache_dir = self._resolve_checkpoint_path(self._cfg_select("cache_dir", None))
+        if cache_dir is not None and (cache_dir / "meta.json").exists():
+            return cache_dir
+
+        dataset_path = self._resolve_checkpoint_path(self._cfg_select("dataset_path", None))
+        if dataset_path is None:
+            dataset_path = self._resolve_checkpoint_path(
+                self._cfg_select("task.dataset.dataset_path", None)
+            )
+        if dataset_path is None:
+            return None
+
+        candidates = [
+            dataset_path,
+            dataset_path / "rgb_lmdb",
+            dataset_path / f"{dataset_path.name}_lmdb",
+        ]
+        for candidate in candidates:
+            if (candidate / "meta.json").exists() and (candidate / "arrays.npz").exists():
+                return candidate
+        return None
+
+    def _load_task_context(self) -> tuple[np.ndarray, Optional[np.ndarray]]:
+        cache_dir = self._checkpoint_cache_dir()
+        if cache_dir is not None:
+            try:
+                arrays_path = cache_dir / "arrays.npz"
+                with np.load(arrays_path, allow_pickle=True) as arrays:
+                    task_embedding_arr = arrays["lowdim/task_embedding"][0]
+                    task_language_tokens_arr = (
+                        arrays["lowdim/task_language_tokens"][0]
+                        if "lowdim/task_language_tokens" in arrays
+                        else None
+                    )
+                task_embedding = np.asarray(
+                    task_embedding_arr,
+                    dtype=np.float32,
+                )
+                if task_embedding.ndim == 2 and task_embedding.shape[0] == 1:
+                    task_embedding = task_embedding[0]
+                task_embedding = _normalize_task_embedding(task_embedding)
+
+                task_language_tokens = None
+                if task_language_tokens_arr is not None:
+                    task_language_tokens = _normalize_task_language_tokens(
+                        np.asarray(task_language_tokens_arr, dtype=np.float32)
+                    )
+
+                print(f"[SeekerPolicy] task context loaded from checkpoint dataset cache: {cache_dir}")
+                return task_embedding.astype(np.float32), task_language_tokens
+            except Exception as exc:
+                print(
+                    "[SeekerPolicy] warning: failed to load task context from "
+                    f"checkpoint dataset cache {cache_dir}: {exc}"
+                )
+
+        instruction = None
+        if cache_dir is not None:
+            try:
+                meta, _ = load_metadata(str(cache_dir))
+                instruction = meta.get("task_instruction", None)
+            except Exception:
+                instruction = None
+        if instruction is None:
+            instruction = task_name_to_instruction(self.task_name)
+        print(
+            "[SeekerPolicy] warning: recomputing task context from instruction "
+            f"instead of checkpoint cache arrays: {instruction!r}"
+        )
+        return (
+            try_task_embedding(instruction).astype(np.float32),
+            try_task_language_tokens(instruction),
+        )
+
+    def _shape_meta_obs(self):
+        shape_meta = getattr(self.cfg, "shape_meta", None)
+        if shape_meta is None and hasattr(self.cfg, "task"):
+            shape_meta = getattr(self.cfg.task, "shape_meta", None)
+        if shape_meta is None:
+            return {}
+        return shape_meta.get("obs", {}) if hasattr(shape_meta, "get") else {}
+
+    def _policy_image_size(self) -> int:
+        obs_meta = self._shape_meta_obs()
+        image_meta = obs_meta.get("agentview_image", {}) if hasattr(obs_meta, "get") else {}
+        shape = image_meta.get("shape", None) if hasattr(image_meta, "get") else None
+        if shape is not None and len(shape) >= 3:
+            return int(shape[-1])
+        return int(REAL_POLICY_IMAGE_SIZE)
+
+    def _policy_rot_dim(self) -> int:
+        obs_meta = self._shape_meta_obs()
+        rot_meta = obs_meta.get("robot0_eef_rot", {}) if hasattr(obs_meta, "get") else {}
+        shape = rot_meta.get("shape", None) if hasattr(rot_meta, "get") else None
+        if shape is not None and len(shape) >= 1:
+            return int(shape[-1])
+        return int(REAL_POLICY_ROT_DIM)
+
+    def _print_eval_preprocessing_summary(self) -> None:
+        obs_encoder = getattr(self.policy, "obs_encoder", None)
+        focus = getattr(obs_encoder, "focus_view_transform", None)
+        focus_source = getattr(focus, "focus_source", "none")
+        view_modes = getattr(focus, "view_modes", {})
+        vit_in = getattr(focus, "vit_in", None)
+        low_res = getattr(focus, "low_res", None)
+        out_res = getattr(focus, "out_res", None)
+        print(
+            "[SeekerPolicy] eval preprocessing: "
+            f"real_camera_crop=enabled "
+            f"policy_image_size={self._policy_image_size()} "
+            f"rot_dim={self._policy_rot_dim()} "
+            f"focus_source={focus_source} "
+            f"view_modes={dict(view_modes)} "
+            f"vit_in={vit_in} low_res={low_res} out_res={out_res}"
+        )
+
+    def format_policy_input(self, obs_dict):
+        return preprocess_real_obs_for_policy(
+            obs_dict,
+            target_size=self._policy_image_size(),
+            rot_dim=self._policy_rot_dim(),
+        )
+
+    def _match_policy_obs_horizon(self, obs_dict):
+        expected = int(self.n_obs_steps)
+        if expected <= 0:
+            return obs_dict
+
+        first_value = next(iter(obs_dict.values()))
+        obs_steps = int(first_value.shape[1])
+        if obs_steps == expected:
+            return obs_dict
 
         out = {}
-
-        # ---- images: HWC RGB uint8 -> CHW float32, crop/resize ----
-        for cam_key, seq in rgb.items():
-            if cam_key not in cam_map:
-                continue
-            pol_key = cam_map[cam_key]
-
-            imgs = []
-            for t in range(T):
-                im = seq[t]  # expected HWC RGB uint8
-                im = np.asarray(im)
-
-                if im.ndim != 3 or im.shape[-1] != 3:
-                    raise ValueError(f"{cam_key}: expected HWC RGB, got {im.shape}")
-
-                # HARDCODED
-                im = center_square_crop(im, camera_name=cam_key)
-                target = 240
-                if (im.shape[0] != target) or (im.shape[1] != target):
-                    im = cv2.resize(im, (target, target), interpolation=cv2.INTER_AREA)
-
-                # to float [0,1] and CHW
-                im = im.astype(np.float32) / 255.0
-                im = np.moveaxis(im, -1, 0)  # CHW
-                imgs.append(im)
-
-            imgs_np = np.stack(imgs, axis=0).astype(np.float32)  # (T,3,H,W)
-            out[pol_key] = imgs_np[None, ...] # (1,T,3,H,W)
-
-        # ensure required images exist
-        if "agentview_image" not in out or "robot0_eye_in_hand_image" not in out:
-            raise KeyError(f"Missing required image keys after mapping. Got={list(out.keys())}")
-
-        # ---- lowdim: ee_pose6 -> eef_pos (3) + eef_rot (6) ----
-        ee_pose6 = np.asarray(low["ee_pose6"], dtype=np.float32)  # (T,6)
-        if ee_pose6.ndim == 1:
-            ee_pose6 = ee_pose6[None, :]
-
-        eef_pos, eef_rot6 = pose6_to_xyz6(ee_pose6)  # (T,3), (T,6)
-
-        out["robot0_eef_pos"] = eef_pos[None, ...].astype(np.float32) # (1,T,3)
-        out["robot0_eef_rot"] = eef_rot6[None, ...].astype(np.float32) # (1,T,6)
-
-        # ---- gripper: scalar -> (T,2) as in your conversion code ----
-        g = np.asarray(low["gripper_state"], dtype=np.float32)
-        g = g.reshape(-1, 1)  # (T,1)
-
-        g = g / 2.0
-        g_np = np.concatenate([g, -g], axis=-1).astype(np.float32)  # (T,2)
-        out["robot0_gripper_qpos"] = g_np[None, ...] # (1,T,2)
-
+        for key, value in obs_dict.items():
+            if obs_steps < expected:
+                pad = np.repeat(value[:, :1, ...], expected - obs_steps, axis=1)
+                out[key] = np.concatenate([pad, value], axis=1)
+            else:
+                out[key] = value[:, -expected:, ...]
         return out
     
     @torch.no_grad()
     def infer_action(self, np_obs_dict):
         # Not using past action
         np_obs_dict = self.format_policy_input(np_obs_dict)
+        np_obs_dict = self._match_policy_obs_horizon(np_obs_dict)
+        first_value = next(iter(np_obs_dict.values()))
+        batch_size, obs_steps = first_value.shape[:2]
+        task_embedding = _normalize_task_embedding(self.task_embedding)
+        # Match RealWorldDataset batches: [B, T, ...]. Seeker flattens internally.
+        np_obs_dict["task_embedding"] = np.broadcast_to(
+            task_embedding[:, None, :],
+            (batch_size, obs_steps, task_embedding.shape[-1]),
+        ).copy()
+        np_obs_dict["robot_id"] = np.full(
+            (batch_size, obs_steps, 1),
+            int(self.robot_id),
+            dtype=np.float32,
+        )
+        if self.task_language_tokens is not None:
+            tokens = np.asarray(self.task_language_tokens, dtype=np.float32)
+            if tokens.ndim == 2:
+                tokens = tokens[None, :, :]
+            np_obs_dict["task_language_tokens"] = np.broadcast_to(
+                tokens[:, None, :, :],
+                (batch_size, obs_steps, tokens.shape[-2], tokens.shape[-1]),
+            ).copy()
         obs_dict = dict_apply(
             np_obs_dict, lambda x: torch.from_numpy(x).to(device=self.device)
         )
-        task_embedding = torch.from_numpy(self.task_embedding.copy()).to(device=self.device)
-        if task_embedding.ndim == 1:
-            task_embedding = task_embedding[None, ...]
         
         with torch.no_grad():
-            action_dict = self.policy.predict_action(
-                obs_dict, task_embedding, viz_dir=None
-            )
+            action_dict = self.policy.predict_action(obs_dict)
+        obs_encoder = getattr(self.policy, "obs_encoder", None)
+        self.last_visual_focus_records = list(
+            getattr(obs_encoder, "last_visual_focus_records", [])
+        )
         np_action_dict = dict_apply(
             action_dict, lambda x: x.detach().to("cpu").numpy()
         )

@@ -47,7 +47,7 @@ def _is_finite_scalar(x) -> bool:
 
 class TeleopDataCollector:
     """
-    Two-stream collector (optional full + optional light) under same task name:
+    Two-stream collector (optional full + optional rgb) under same task name:
 
       <root>/<task_name>/
         task_meta.json
@@ -56,14 +56,14 @@ class TeleopDataCollector:
             <cam>/rgb/*.png
             <cam>/depth_rect/*.npy
             lowdim.npz
-        light/
+        rgb/
           episode_0001/
             <cam>/rgb/*.png
             lowdim.npz
 
     Streams enabled by config:
       - cfg.enable_full_sync  -> all_sensors stream
-      - cfg.enable_light_sync -> light stream
+      - cfg.enable_rgb_sync -> rgb stream
     """
 
     def __init__(self, ds: DatasetInfo, cfg: CollectorConfig, robot):
@@ -77,8 +77,8 @@ class TeleopDataCollector:
 
         # per-stream enable
         self.enable_full = cfg.enable_full_sync
-        self.enable_light = cfg.enable_light_sync
-        assert self.enable_full or self.enable_light, "Collector: at least one stream must be enabled"
+        self.enable_rgb = cfg.enable_rgb_sync
+        assert self.enable_full or self.enable_rgb, "Collector: at least one stream must be enabled"
 
         self.data_root = ds.root_dir
         self.task_name = ds.task
@@ -86,15 +86,15 @@ class TeleopDataCollector:
         _ensure(self.task_dir)
 
         self.dir_all = os.path.join(self.task_dir, "all_sensors")
-        self.dir_light = os.path.join(self.task_dir, "light")
+        self.dir_rgb = os.path.join(self.task_dir, "rgb")
         if self.enable_full:
             _ensure(self.dir_all)
-        if self.enable_light:
-            _ensure(self.dir_light)
+        if self.enable_rgb:
+            _ensure(self.dir_rgb)
 
-        # shared episode indexing (use all_sensors if enabled, else light)
+        # shared episode indexing (use all_sensors if enabled, else rgb)
         self.episode_prefix = "episode_"
-        base_for_idx = self.dir_all if self.enable_full else self.dir_light
+        base_for_idx = self.dir_all if self.enable_full else self.dir_rgb
         existing_next = next_demo_id(base_for_idx, self.episode_prefix)
         self.current_demo_id = max(int(existing_next), int(ds.demo_id_start))
         self.demo_id_end = int(ds.demo_id_start) + int(ds.num_demos) - 1
@@ -105,33 +105,33 @@ class TeleopDataCollector:
         self.quit_requested = False
 
         self._ep_all: Optional[str] = None
-        self._ep_light: Optional[str] = None
+        self._ep_rgb: Optional[str] = None
 
         self._frame_all = 0
-        self._frame_light = 0
+        self._frame_rgb = 0
         self._lowdim_all: List[Dict[str, Any]] = []
-        self._lowdim_light: List[Dict[str, Any]] = []
+        self._lowdim_rgb: List[Dict[str, Any]] = []
 
         # separate queues to maximize throughput / avoid head-of-line blocking
         qmax = int(cfg.max_queue)
         self._q_all: "queue.Queue[SyncedSample]" = queue.Queue(maxsize=qmax)
-        self._q_light: "queue.Queue[SyncedSample]" = queue.Queue(maxsize=qmax)
+        self._q_rgb: "queue.Queue[SyncedSample]" = queue.Queue(maxsize=qmax)
 
         # worker threads (only start what we need)
         self._worker_all = None
-        self._worker_light = None
+        self._worker_rgb = None
         if self.enable_full:
             self._worker_all = threading.Thread(target=self._worker_loop_all, daemon=True)
             self._worker_all.start()
-        if self.enable_light:
-            self._worker_light = threading.Thread(target=self._worker_loop_light, daemon=True)
-            self._worker_light.start()
+        if self.enable_rgb:
+            self._worker_rgb = threading.Thread(target=self._worker_loop_rgb, daemon=True)
+            self._worker_rgb.start()
 
         self._write_task_meta_once()
         self.keyboard_listener()
 
         rospy.loginfo(
-            f"[Collector] task_dir={self.task_dir} enable_full={self.enable_full} enable_light={self.enable_light}"
+            f"[Collector] task_dir={self.task_dir} enable_full={self.enable_full} enable_rgb={self.enable_rgb}"
         )
         rospy.loginfo(f"[Collector] episode range: {self.current_demo_id} .. {self.demo_id_end}")
 
@@ -209,15 +209,15 @@ class TeleopDataCollector:
             # drop to protect control
             pass
 
-    def enqueue_light(self, sample: SyncedSample):
-        if not self.enable_light:
+    def enqueue_rgb(self, sample: SyncedSample):
+        if not self.enable_rgb:
             return
         if not self.demo_in_progress:
             return
         if self.save_requested or self.quit_requested or self.delete_requested:
             return
         try:
-            self._q_light.put_nowait(sample)
+            self._q_rgb.put_nowait(sample)
         except queue.Full:
             pass
 
@@ -242,23 +242,23 @@ class TeleopDataCollector:
                 except Exception:
                     pass
 
-    def _worker_loop_light(self):
+    def _worker_loop_rgb(self):
         while not rospy.is_shutdown():
             if self._handle_flags():
                 continue
 
             try:
-                s = self._q_light.get(timeout=0.1)
+                s = self._q_rgb.get(timeout=0.1)
             except queue.Empty:
                 continue
 
             try:
-                self._on_sample_light(s)
+                self._on_sample_rgb(s)
             except Exception as e:
-                rospy.logwarn_throttle(1.0, f"[Collector] light worker exception: {e}")
+                rospy.logwarn_throttle(1.0, f"[Collector] rgb worker exception: {e}")
             finally:
                 try:
-                    self._q_light.task_done()
+                    self._q_rgb.task_done()
                 except Exception:
                     pass
 
@@ -304,14 +304,14 @@ class TeleopDataCollector:
                 except queue.Empty:
                     pass
 
-            if self.enable_light:
+            if self.enable_rgb:
                 try:
-                    s = self._q_light.get_nowait()
+                    s = self._q_rgb.get_nowait()
                     did = True
                     try:
-                        self._on_sample_light(s)
+                        self._on_sample_rgb(s)
                     finally:
-                        self._q_light.task_done()
+                        self._q_rgb.task_done()
                 except queue.Empty:
                     pass
 
@@ -328,9 +328,9 @@ class TeleopDataCollector:
         ep_name = f"{self.episode_prefix}{self.current_demo_id:04d}"
 
         self._ep_all = os.path.join(self.dir_all, ep_name) if self.enable_full else None
-        self._ep_light = os.path.join(self.dir_light, ep_name) if self.enable_light else None
+        self._ep_rgb = os.path.join(self.dir_rgb, ep_name) if self.enable_rgb else None
 
-        for p in [self._ep_all, self._ep_light]:
+        for p in [self._ep_all, self._ep_rgb]:
             if p is None:
                 continue
             if os.path.exists(p):
@@ -338,9 +338,9 @@ class TeleopDataCollector:
             _ensure(p)
 
         self._frame_all = 0
-        self._frame_light = 0
+        self._frame_rgb = 0
         self._lowdim_all.clear()
-        self._lowdim_light.clear()
+        self._lowdim_rgb.clear()
 
         self.demo_in_progress = True
         self.delete_requested = False
@@ -348,16 +348,16 @@ class TeleopDataCollector:
         self.quit_requested = False
 
     def delete_demo(self):
-        for p in [self._ep_all, self._ep_light]:
+        for p in [self._ep_all, self._ep_rgb]:
             if p and os.path.isdir(p):
                 rospy.logwarn(f"[Collector] Deleting {p}")
                 shutil.rmtree(p, ignore_errors=True)
 
         self.demo_in_progress = False
         self._frame_all = 0
-        self._frame_light = 0
+        self._frame_rgb = 0
         self._lowdim_all.clear()
-        self._lowdim_light.clear()
+        self._lowdim_rgb.clear()
         # keep current_demo_id unchanged so user can redo
         
         self.robot.home()
@@ -426,7 +426,7 @@ class TeleopDataCollector:
                 return False
         return True
 
-    def _validate_cams_light(self, cams: Any) -> bool:
+    def _validate_cams_rgb(self, cams: Any) -> bool:
         if not isinstance(cams, dict) or len(cams) != 2:
             return False
         for _, m in cams.items():
@@ -450,9 +450,9 @@ class TeleopDataCollector:
         _ensure(depth_dir)
         return rgb_dir, depth_dir
 
-    def _ensure_cam_dirs_light(self, cam_name: str) -> str:
-        assert self._ep_light is not None
-        cam_dir = os.path.join(self._ep_light, cam_name)
+    def _ensure_cam_dirs_rgb(self, cam_name: str) -> str:
+        assert self._ep_rgb is not None
+        cam_dir = os.path.join(self._ep_rgb, cam_name)
         rgb_dir = os.path.join(cam_dir, "rgb")
         _ensure(rgb_dir)
         return rgb_dir
@@ -491,10 +491,10 @@ class TeleopDataCollector:
         rospy.loginfo_throttle(1.0, f"[Collector] all_sensors saving frame {self._frame_all}")
 
 
-    def _on_sample_light(self, sample: SyncedSample):
-        if not self.enable_light:
+    def _on_sample_rgb(self, sample: SyncedSample):
+        if not self.enable_rgb:
             return
-        if not self.demo_in_progress or self._ep_light is None:
+        if not self.demo_in_progress or self._ep_rgb is None:
             return
 
         lowdim = self._validate_lowdim_common(sample)
@@ -503,22 +503,22 @@ class TeleopDataCollector:
             return
 
         cams = getattr(sample, "cameras", None)
-        if not self._validate_cams_light(cams):
+        if not self._validate_cams_rgb(cams):
             rospy.logwarn("[Collector] Cams is None, skipping sample.")
             return
 
-        idx = self._frame_light
+        idx = self._frame_rgb
         for cam_name, m in cams.items():
-            rgb_dir = self._ensure_cam_dirs_light(cam_name)
+            rgb_dir = self._ensure_cam_dirs_rgb(cam_name)
             rgb_msg = m.rgb if hasattr(m, "rgb") else m
             img = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
             self._write_rgb(
                 os.path.join(rgb_dir, f"{idx:06d}.png"),
                 img,
             )
-        self._lowdim_light.append(lowdim)
-        self._frame_light += 1
-        rospy.loginfo_throttle(1.0, f"[Collector] light saving frame {self._frame_light}")
+        self._lowdim_rgb.append(lowdim)
+        self._frame_rgb += 1
+        rospy.loginfo_throttle(1.0, f"[Collector] rgb saving frame {self._frame_rgb}")
 
     # ---------------- finish ----------------
     def _check_integrity_stream(
@@ -622,17 +622,17 @@ class TeleopDataCollector:
                 self.delete_demo()
                 return
 
-        if self.enable_light:
-            if self._ep_light is None:
-                rospy.logerr("[Collector] light enabled but ep dir is None")
+        if self.enable_rgb:
+            if self._ep_rgb is None:
+                rospy.logerr("[Collector] rgb enabled but ep dir is None")
                 return
             rgb_ext = ".png"
-            ok_light = self._check_integrity_stream(
-                self._ep_light, self._frame_light, self._lowdim_light,
+            ok_rgb = self._check_integrity_stream(
+                self._ep_rgb, self._frame_rgb, self._lowdim_rgb,
                 expect_depth=False, rgb_ext=rgb_ext, depth_ext=".npy"
             )
-            if not ok_light:
-                rospy.logerr("[Collector] light integrity failed. Deleting episode for redo.")
+            if not ok_rgb:
+                rospy.logerr("[Collector] rgb integrity failed. Deleting episode for redo.")
                 self.delete_demo()
                 return
 
@@ -641,9 +641,9 @@ class TeleopDataCollector:
             self._write_lowdim(os.path.join(self._ep_all, "lowdim.npz"), self._lowdim_all)
             rospy.loginfo(f"[Collector] Saved episode all_sensors: {self._ep_all}")
 
-        if self.enable_light and self._ep_light is not None:
-            self._write_lowdim(os.path.join(self._ep_light, "lowdim.npz"), self._lowdim_light)
-            rospy.loginfo(f"[Collector] Saved episode light: {self._ep_light}")
+        if self.enable_rgb and self._ep_rgb is not None:
+            self._write_lowdim(os.path.join(self._ep_rgb, "lowdim.npz"), self._lowdim_rgb)
+            rospy.loginfo(f"[Collector] Saved episode rgb: {self._ep_rgb}")
 
         self.demo_in_progress = False
         self.current_demo_id += 1
