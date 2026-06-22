@@ -4,6 +4,7 @@ set -euo pipefail
 CONTAINER_NAME="${CONTAINER_NAME:-ros1_noetic}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-ros:noetic}"
 CATKIN_MOUNT="${CATKIN_MOUNT:-$HOME/docker_shared/catkin_ws}"
+DOCKER_GPU_ARGS="${DOCKER_GPU_ARGS---gpus all}"
 
 usage() {
   cat <<EOF
@@ -20,6 +21,7 @@ Environment overrides:
   CONTAINER_NAME   (default: ros1_noetic)
   DOCKER_IMAGE     (default: ros:noetic)
   CATKIN_MOUNT     (default: \$HOME/docker_shared/catkin_ws)
+  DOCKER_GPU_ARGS  (default: --gpus all; set to empty on hosts without NVIDIA runtime)
 EOF
 }
 
@@ -31,7 +33,7 @@ create_container() {
     --name "${CONTAINER_NAME}" \
     --network host \
     --privileged \
-    --gpus all \
+    ${DOCKER_GPU_ARGS} \
     -v /dev:/dev \
     -v /run/udev:/run/udev:ro \
     -v "${CATKIN_MOUNT}:/root/catkin_ws" \
@@ -48,7 +50,7 @@ start_container() {
 }
 
 exec_container() {
-  docker exec -it "${CONTAINER_NAME}" zsh
+  docker exec -it "${CONTAINER_NAME}" bash -lc 'command -v zsh >/dev/null && exec zsh || exec bash'
 }
 
 bootstrap_container() {

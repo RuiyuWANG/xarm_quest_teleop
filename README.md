@@ -1,32 +1,32 @@
-# XArm ROS1 Quest Teleoperation
+# XArm Quest Teleop ROS1
 
-This repository supports UFactory xArm7 + xArm gripper teleoperation through Meta Quest 2, a data collection pipeline for VR human demonstrations, and policy evaluation stack for:
-- xArm + gripper
-- Meta Quest 2 (`quest2ros`)
-- Intel RealSense
-- ROS Noetic
+ROS1 teleoperation, data collection, and policy evaluation for an xArm7 with a Meta Quest controller and RealSense cameras.
 
-The repo includes two ROS packages in `ros_link/`:
-- `teleop_msgs`
-- `cloudgripper_teleop`
+This branch is the ROS1 open-source release. The ROS2 migration work lives on the `ros2` branch and keeps a similar workflow shape, but uses ROS Humble, `ament`, and ROS2 launch files.
 
-Key features:
-- VR teleoperation for xArm7 + xArm gripper
-- Position-control teleoperation
-- ROS1 + Docker support
-- Plug-and-play data collection and policy evaluation pipeline
-- Synchronized multi-camera support for both RGB and RGB-D  
-  Note: synchronization is software-side and can still be challenging in multi-camera systems; hardware synchronization may be needed for best results.
-- Automated camera calibration (intrinsics + extrinsics) for both third-person and eye-in-hand cameras
+## Branches And ROS Versions
 
-## 1. Prerequisites
+- `open_source`: ROS1 Noetic release for teleoperation, data collection, and policy evaluation.
+- `teleop` / `main`: historical ROS1 development branches.
+- `ros2`: ROS2 Humble migration branch.
 
-- Ubuntu + ROS Noetic installed
-- A catkin workspace (default expected path: `~/catkin_ws`)
-- `xarm_ros`, `quest2ros`, `ros_tcp_endpoint`, and `realsense2_camera` available in your ROS environment
-- Python 3
+Keep ROS1 and ROS2 workspaces separate. This branch is intended for ROS1 Noetic and catkin.
 
-## 2. Quick start
+## Hardware
+
+Default hardware assumptions:
+
+- xArm7 with xArm gripper.
+- Meta Quest 2 running the Quest2ROS app.
+- Intel RealSense D405, default serial `230322271104`.
+- Intel RealSense D435i front camera, default serial `335522071488`.
+- Optional Intel RealSense D435i shoulder camera, default serial `233522073481`.
+
+## Install
+
+### Normal Host Install
+
+Use Ubuntu 20.04 with ROS Noetic.
 
 ```bash
 ./install.sh
@@ -34,224 +34,242 @@ source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel/setup.bash
 ```
 
-Then run (these scripts automatically launch required ROS nodes based on config, such as Quest bridge, xArm bringup, RealSense, and stamped wrapper nodes):
+`install.sh` installs ROS/Python dependencies, creates or reuses a catkin workspace, links this repo into `~/catkin_ws/src`, and builds the local ROS wrapper packages.
 
-```bash
-python src/scripts/run_quest_xarm_teleop_sync.py
-python src/scripts/run_data_collection.py
-python src/scripts/run_policy_eval.py
-```
+The host setup expects these ROS1 dependencies in the catkin workspace:
 
-Camera calibration script:
-```bash
-python src/scripts/camera_calibration.py _camera_name:=d405 _setup:=eye_to_hand
-```
+- `xarm_ros`
+- `quest2ros`
+- `ROS-TCP-Endpoint`
+- `realsense-ros`
 
-Example for wrist camera calibration:
-```bash
-python src/scripts/camera_calibration.py _camera_name:=d435i_front _setup:=eye_in_hand
-```
+### Docker Install
 
-## 3. Installation automation
+Docker is optional for this ROS1 branch.
 
-Use:
-
-```bash
-./install.sh
-```
-
-Useful options:
-
-```bash
-./install.sh --catkin-ws /root/catkin_ws
-./install.sh --skip-apt --skip-rosdep
-```
-
-What it automates:
-1. Symlinks `ros_link/teleop_msgs` and `ros_link/cloudgripper_teleop` into your catkin workspace.
-2. Installs base system dependencies.
-3. Runs `rosdep install`.
-4. Installs Python dependencies from `requirement.txt`.
-5. Builds `teleop_msgs` and `cloudgripper_teleop`.
-
-## 4. Docker helpers
-
-Docker startup commands are now kept in [`setup_docker.sh`](./setup_docker.sh):
-
-```bash
-./setup_docker.sh create     # one-time create persistent container
-./setup_docker.sh start      # start + attach
-./setup_docker.sh exec       # new shell in running container
-./setup_docker.sh bootstrap  # install shell/dev tooling inside container
-```
-
-You can override defaults with env vars:
-- `CONTAINER_NAME`
-- `DOCKER_IMAGE`
-- `CATKIN_MOUNT`
-
-## 5. Where configs live
-
-All runtime settings are config-driven:
-- Dataset/task configs: `config/*.json`
-- Teleop/data/eval python configs: `src/configs/*.py`
-- ROS package-level settings/scripts: `ros_link/cloudgripper_teleop/`
-
-If you need to change IPs, camera topics, launch commands, sync windows, or evaluation behavior, start in `src/configs/`.
-
-### Common customizations
-
-1. Robot IP / xArm launch arguments  
-Edit [`src/configs/teleop_config.py`](/home/ruiyuw/Codes/CloudGripper_Manipulation/src/configs/teleop_config.py) in `ROBOT_LAUNCH_CMD` (e.g. `robot_ip:=...`, `add_gripper:=true`).
-
-2. Quest bridge host IP and port  
-Edit [`src/configs/teleop_config.py`](/home/ruiyuw/Codes/CloudGripper_Manipulation/src/configs/teleop_config.py) in `QUEST_LAUNCH_CMD` (e.g. `tcp_ip:=...`, `tcp_port:=10000`).
-
-3. Camera serial numbers / camera launch setup  
-Edit [`src/configs/collector_config.py`](/home/ruiyuw/Codes/CloudGripper_Manipulation/src/configs/collector_config.py) in `realsense_all_launch_cmds`, `realsense_light_launch_cmds`, and `cameras_all` / `cameras_light` topic mappings.
-
-4. Data collection behavior (sync windows, save modes, keyboard controls)  
-Edit [`src/configs/collector_config.py`](/home/ruiyuw/Codes/CloudGripper_Manipulation/src/configs/collector_config.py) (`CameraSyncConfig`, `CollectorConfig`, `RobotSyncConfig`).
-
-5. Policy checkpoint + evaluation settings  
-Edit [`src/configs/eval_config.py`](/home/ruiyuw/Codes/CloudGripper_Manipulation/src/configs/eval_config.py) for `model_ckpt_path`, horizons, control frequency, camera selection, rollout counts, and logging.
-
-6. Task/dataset definitions  
-Edit JSON task files under `config/` (for example `three_piece_toy_d1.json`) and pass with:
-```bash
-python src/scripts/run_data_collection.py _dataset_json:=three_piece_toy_d1.json
-```
-
-## 6. Repo map
-
-- `src/`: core code (teleop, robots, IO, data collection, eval)
-- `ros_link/teleop_msgs/`: custom stamped ROS messages
-- `ros_link/cloudgripper_teleop/`: ROS wrapper nodes/scripts
-- `config/`: task + dataset JSON configs
-- `install.sh`: installation automation
-- `setup_docker.sh`: docker lifecycle + container bootstrap helper
-
-## 7. Optional: Full hardware + ROS setup tutorial
-
-This section is intentionally detailed for first-time full hardware bring-up.
-
-### Step A. Hardware
-
-1. xArm setup
-- Follow UFactory manual: https://www.ufactory.cc/wp-content/uploads/2023/05/xArm-User-Manual-V2.0.0.pdf
-- Connect robot + gripper and power on.
-- Put PC and xArm on the same LAN (example subnet `192.168.1.x`).
-- Verify connection in UFactory Studio.
-- Set initial pose / TCP payload / TCP offset correctly.
-
-2. Meta Quest 2 setup
-- Install Meta Horizon app and enable Developer Mode.
-- Connect Quest and PC to the same network.
-- Install and configure quest2ros app: https://quest2ros.github.io/
-
-3. RealSense camera setup
-- Connect cameras with USB 3.0 cables/ports.
-- Check serial numbers:
-```bash
-rs-enumerate-devices
-```
-
-### Step B. ROS Docker
-
-Before creating or starting the container, allow Docker to access your X display:
 ```bash
 xhost +local:docker
-```
-
-On host:
-```bash
 ./setup_docker.sh create
-```
-
-Later sessions:
-```bash
 ./setup_docker.sh start
 ./setup_docker.sh exec
-```
-
-Inside container (one-time bootstrap):
-```bash
-./setup_docker.sh bootstrap
-```
-
-### Step C. Install ROS dependencies
-
-Install/clone and build these packages in your ROS environment:
-- `xarm_ros`: https://github.com/xArm-Developer/xarm_ros
-- `quest2ros`: https://quest2ros.github.io/
-- `ros_tcp_endpoint`: https://github.com/Unity-Technologies/ROS-TCP-Endpoint
-- `realsense2_camera` (build from source as below)
-
-Camera (RealSense) Will need to build from source, to get a 2.55 + librealsense for D405 camera
-
-```bash
-cd /root
-git clone https://github.com/IntelRealSense/librealsense.git
-cd librealsense
-git checkout v2.56.3
-mkdir -p build && cd build
-cmake .. -DBUILD_EXAMPLES=false -DBUILD_GRAPHICAL_EXAMPLES=false
-make -j"$(nproc)"
-make install
-ldconfig
-```
-
-And ROS1 version of realsense-ros
-
-```bash
-cd ~/catkin_ws/src
-git clone https://github.com/IntelRealSense/realsense-ros.git
-cd realsense-ros
-git checkout noetic-development
-```
-
-### Step D. Test installation
-
-Source ROS and workspace:
-```bash
+./install.sh --catkin-ws /root/catkin_ws
 source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
+source /root/catkin_ws/devel/setup.bash
 ```
 
-Bring up and verify dependencies manually:
+On hosts without NVIDIA Docker support, create the container without GPU flags:
+
+```bash
+DOCKER_GPU_ARGS="" ./setup_docker.sh create
+```
+
+Common Docker commands:
+
+```bash
+./setup_docker.sh help
+./setup_docker.sh exec
+./setup_docker.sh stop
+```
+
+## Build Checks
+
+From a sourced ROS1 shell:
+
+```bash
+catkin build teleop_msgs cloudgripper_teleop
+rosmsg show teleop_msgs/OVR2ROSInputsStamped
+rosmsg show teleop_msgs/RobotMsgStamped
+rosrun cloudgripper_teleop quest_stamped_node.py
+```
+
+Useful runtime checks:
+
+```bash
+rostopic list | grep q2r
+rostopic echo /xarm/xarm_states
+rosservice list | grep /xarm
+```
+
+## Important Configuration
+
+Most users only need these files:
+
+- `src/configs/teleop_config.py`: robot IP launch command, Quest launch command, active hand, deadman button, movement scaling, roll lock, and servo limits.
+- `src/configs/collector_config.py`: RealSense launch commands, camera topic groups, light/full sync mode, and sync timing.
+- `src/configs/eval_config.py`: checkpoint path, rollout timing, action units, gripper settings, logging, and camera sync.
+- `config/*.json`: task-level dataset settings such as task name, output directory, number of demos, collection frequency, and calibration file.
+
+For a new setup, start by changing the xArm IP in `TeleopConfig.ROBOT_LAUNCH_CMD`, then update RealSense serial numbers in `CollectorConfig`.
+
+## Bringup
+
+The teleop and collection scripts can launch the required ROS nodes automatically from their config commands. For manual bringup and debugging, use separate terminals.
+
+Start ROS and the Quest bridge:
+
 ```bash
 roscore
-```
-
-```bash
 roslaunch ros_tcp_endpoint endpoint.launch tcp_ip:=<HOST_IP> tcp_port:=10000
 rosrun quest2ros ros2quest.py
+rosrun cloudgripper_teleop quest_stamped_node.py
 ```
+
+Start the xArm driver:
 
 ```bash
 roslaunch xarm_bringup xarm7_server.launch robot_ip:=<ROBOT_IP> report_type:=dev add_gripper:=true
 ```
 
+Check the expected robot state and service interfaces:
+
 ```bash
-rostopic list
 rostopic echo /xarm/xarm_states
-rosservice call /xarm/move_joint "{pose: [0,0,0,0,0,0,0], mvvelo: 0.35, mvacc: 7, mvtime: 0, wait: 0}"
-rosservice call /xarm/gripper_move 500
+rosservice list | grep /xarm
 ```
 
-### Step E. End manual ROS nodes, then run CloudGripper workflows
+## Teleoperation
 
-First stop all manually started ROS nodes/processes from Step D.  
-Then test teleop first:
+Run synchronized Quest-to-xArm teleoperation:
 
 ```bash
 python src/scripts/run_quest_xarm_teleop_sync.py
 ```
 
-Then run:
+The node waits for stamped Quest pose/input topics, xArm state, and xArm services before enabling control. By default, roll is locked for safer Cartesian teleop; adjust `lock_roll` and `locked_roll_rad` in `src/configs/teleop_config.py` when a task needs full orientation control.
+
+## Data Collection
+
+Collect demonstrations with the synchronized teleop collector:
 
 ```bash
-python src/scripts/run_data_collection.py
+python src/scripts/run_data_collection.py _dataset_json:=three_piece_toy_d1.json
 ```
 
-The Python entry scripts auto-launch required ROS dependencies based on your config files.
+Keyboard controls:
+
+- `c`: start or continue recording.
+- `s`: save the current episode.
+- `d`: delete the current episode.
+- `q`: quit.
+
+Raw episodes are written under:
+
+```text
+data/<task>/
+  task_meta.json
+  light/episode_*/
+  all_sensors/episode_*/
+```
+
+Collection modes are controlled in `src/configs/collector_config.py`:
+
+- Light mode records the configured RGB cameras in `cameras_light`.
+- Full mode records the configured RGB-D cameras in `cameras_all`.
+
+The stored action contract is absolute robot action:
+
+```text
+[x_mm, y_mm, z_mm, rot6d_first_two_columns, gripper]
+```
+
+## Multi-Camera Setup
+
+List connected cameras:
+
+```bash
+rs-enumerate-devices
+```
+
+Then update the serial numbers in the RealSense launch commands in `src/configs/collector_config.py`.
+
+Default topic names expected by the collector and evaluator:
+
+- `/d405/color/image_raw`
+- `/d435i_front/color/image_raw`
+- `/d435i_front/depth/image_rect_raw`
+- `/d435i_shoulder/color/image_raw`
+
+Manual RealSense launch example:
+
+```bash
+roslaunch realsense2_camera rs_camera.launch \
+  serial_no:=230322271104 \
+  camera:=d405 \
+  enable_color:=true \
+  enable_depth:=false
+```
+
+For multiple cameras, launch one driver instance per camera name and serial number.
+
+## Calibration
+
+Run calibration utilities from a sourced environment:
+
+```bash
+python src/scripts/camera_calibration.py _camera_name:=d405 _setup:=eye_to_hand
+python src/scripts/camera_calibration.py _camera_name:=d435i_front _setup:=eye_in_hand
+```
+
+Keep task JSON calibration paths compatible with existing datasets and cache conversion tools.
+
+## Policy Evaluation
+
+Run policy evaluation:
+
+```bash
+python src/scripts/run_policy_eval.py
+```
+
+Override the checkpoint or skip Quest launch from ROS params:
+
+```bash
+python src/scripts/run_policy_eval.py _model_ckpt:=/path/to/model.ckpt _launch_quest:=false
+```
+
+Keyboard controls:
+
+- `c`: start or continue rollout.
+- `p`: pause.
+- `r`: reset episode.
+- `s`: mark success.
+- `f`: mark failure.
+- `q`: quit.
+
+Policy evaluation reads camera observations, builds temporal RGB observations, predicts action chunks, and executes absolute xArm actions. If a policy outputs XYZ in meters, set `xyz_unit = "m"` in `src/configs/eval_config.py`; otherwise the default is millimeters.
+
+## Add A Policy
+
+Add a new policy behind the same small interface used by `src/eval/eval_runner.py`:
+
+- Load the model in a policy module under `src/policy/`.
+- Expose an inference method that accepts the current observation dict.
+- Return action chunks with shape `[T, action_dim]`.
+- Keep actions compatible with `[xyz_mm, rot6d, gripper]`, or set `xyz_unit` in eval config when conversion is needed.
+
+Use `src/policy/seeker_policy.py` as the current reference implementation.
+
+## Custom Data Conversion
+
+Raw collection data is intentionally simple: synchronized images, low-dimensional robot state, actions, and task metadata. For a custom converter:
+
+- Read task metadata from `data/<task>/task_meta.json`.
+- Load episode folders from `light/` or `all_sensors/`.
+- Preserve timestamps when resampling observations and actions.
+- Keep the action convention absolute unless the downstream policy explicitly documents another format.
+- Write converted caches outside the raw dataset directory so raw demonstrations stay immutable.
+
+## Repo Map
+
+```text
+config/                         Task and dataset JSON files
+ros_link/cloudgripper_teleop/    ROS1 wrapper nodes for stamped Quest messages
+ros_link/teleop_msgs/            ROS1 custom stamped message definitions
+src/configs/                     Runtime Python config objects
+src/data_collection/             Dataset collector and writers
+src/eval/                        Policy rollout runner
+src/policy/                      Policy wrappers
+src/robots/                      xArm robot adapter
+src/scripts/                     CLI entry points
+src/teleop/                      Quest-to-xArm teleop loop
+src/utils/                       Shared transforms, ROS helpers, and utilities
+```

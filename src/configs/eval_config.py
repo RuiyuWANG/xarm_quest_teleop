@@ -31,6 +31,7 @@ class EvalConfig:
     obs_horizon: int = 1     # To
     pred_horizon: int = 16    # Ta
     exec_horizon: int = 8    # Te (1..Ta)
+    exec_start_offset: int = 1
     dt_ctrl: float = 1.0 / 30.0
     use_delay_comp: bool = True
     
@@ -59,6 +60,7 @@ class EvalConfig:
     gripper_open_pulse: float = 850.0
     gripper_close_pulse: float = 100.0
     gripper_deadband: float = 0.5
+    gripper_command_eps: float = 5.0
 
     # ---------------- sync ----------------
     enable_light_sync: bool = True

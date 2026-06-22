@@ -7,3 +7,17 @@ __pycache__/
 
 .DS_Store
 *.log
+
+# ROS/catkin/colcon generated outputs
+build/
+devel/
+install/
+log/
+
+# Runtime/generated experiment artifacts
+data/
+evaluation/
+evaluation_retimed_gifs/
+evaluation_temporal_strips/
+*.bag
+*.db3

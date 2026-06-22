@@ -66,6 +66,16 @@ if [[ ! -d "${REPO_ROOT}/ros_link/teleop_msgs" || ! -d "${REPO_ROOT}/ros_link/cl
   exit 1
 fi
 
+ROS_SETUP="${ROS_SETUP:-/opt/ros/noetic/setup.bash}"
+if [[ -f "${ROS_SETUP}" ]]; then
+  # shellcheck disable=SC1090
+  source "${ROS_SETUP}"
+else
+  echo "ROS setup file not found: ${ROS_SETUP}" >&2
+  echo "Install ROS Noetic or set ROS_SETUP to the correct setup.bash path." >&2
+  exit 1
+fi
+
 mkdir -p "${CATKIN_WS}/src"
 
 if [[ ! -f "${CATKIN_WS}/src/CMakeLists.txt" ]]; then
@@ -76,7 +86,13 @@ fi
 link_pkg() {
   local src="$1"
   local dst="$2"
-  rm -rf "${dst}"
+  if [[ -L "${dst}" ]]; then
+    rm "${dst}"
+  elif [[ -e "${dst}" ]]; then
+    echo "[install] Refusing to overwrite existing non-symlink path: ${dst}" >&2
+    echo "[install] Move it aside or remove it manually, then rerun install.sh." >&2
+    exit 1
+  fi
   ln -s "${src}" "${dst}"
 }
 
@@ -115,7 +131,8 @@ if [[ "${SKIP_CATKIN_BUILD}" -eq 0 ]]; then
   echo "[install] Building ROS packages"
   (
     cd "${CATKIN_WS}"
-    source /opt/ros/noetic/setup.bash
+    # shellcheck disable=SC1090
+    source "${ROS_SETUP}"
     catkin build teleop_msgs cloudgripper_teleop
   )
 fi

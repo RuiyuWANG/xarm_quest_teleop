@@ -74,6 +74,8 @@ class TeleopConfig:
     
     # Apply orientation deltas
     enable_orientation: bool = True
+    lock_roll: bool = True
+    locked_roll_rad: float = float(np.pi)
     rot_deadband_rad: float = 0.05
 
     # Filtering

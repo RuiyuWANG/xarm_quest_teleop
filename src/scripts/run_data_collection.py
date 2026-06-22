@@ -19,7 +19,7 @@ from src.configs.collector_config import CollectorConfig
 
 from src.robots.xarm import XArmRobot
 from src.teleop.quest_xarm_teleop_sync import QuestXArmTeleopSync
-from src.data_collection.colloter import TeleopDataCollector
+from src.data_collection.collector import TeleopDataCollector
 
 
 def resolve_path(p: str) -> str:

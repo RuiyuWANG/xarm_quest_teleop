@@ -62,6 +62,7 @@ class EvalRunner:
 
         # planning/execution state
         self._last_grip_bin: Optional[int] = None
+        self._last_grip_value: Optional[float] = None
         self._plan_t_obs: float = 0.0
         self._last_exec_action10: Optional[np.ndarray] = None
 
@@ -425,11 +426,10 @@ class EvalRunner:
         if self.cfg.record:
             self._update_latest_record_frame(rgb_dict)
 
-    # TODO: add depth
     def on_full_rgbd_set(self, t_cam: float, cams_set: Dict[str, Any]):
         """
         Optional full sync: cams_set[cam] has .rgb and .depth
-        We still only use rgb cams in cfg.rgb_cams_light for now.
+        Current policy observation path consumes RGB; depth is retained in the synchronized input for future extensions.
         """
         t_cam = float(t_cam)
         s = self.sample_ring.nearest(t_cam, float(self.cfg.robot_sync.robot_match_window_s))
@@ -488,14 +488,23 @@ class EvalRunner:
         }
         return float(latest.t_obs), temporal_obs
 
-    # HARDCODE
     def _compute_exec_slice(self) -> Tuple[int, int]:
         Ta = int(self.cfg.pred_horizon)
         Te = int(self.cfg.exec_horizon)
 
-        start = 1
+        start = max(0, int(getattr(self.cfg, "exec_start_offset", 1)))
         end = min(start + Te, Ta)
         return start, end
+
+    def _normalize_action_units(self, acts: np.ndarray) -> np.ndarray:
+        out = np.asarray(acts, dtype=np.float32).copy()
+        unit = str(getattr(self.cfg, "xyz_unit", "mm")).strip().lower()
+        if unit in {"mm", "millimeter", "millimeters"}:
+            return out
+        if unit in {"m", "meter", "meters"}:
+            out[..., 0:3] *= 1000.0
+            return out
+        raise ValueError(f"Unsupported xyz_unit={unit!r}; expected 'mm' or 'm'")
 
     def _pose_error(self, cur6: np.ndarray, tgt6: np.ndarray) -> Tuple[float, float]:
         dp = float(np.linalg.norm(cur6[:3] - tgt6[:3], ord=2))
@@ -513,12 +522,12 @@ class EvalRunner:
     def _convert_action_to_robot(self, act: np.ndarray) -> Tuple[np.ndarray, Optional[float]]:
         """
         act: [x,y,z, rot6d(6), grip?]
-        xyz unit per cfg.xyz_unit.
+        xyz already normalized to robot millimeters.
         returns pose6_mm_rpy + optional gripper scalar
         """
         act = np.asarray(act, dtype=np.float32).reshape(1, -1)
         if act.shape[-1] < 9:
-            raise ValueError(f"Expected >=9 dims (xyz+rot6d), got {act.shape[0]}")
+            raise ValueError(f"Expected >=9 dims (xyz+rot6d), got {act.shape[-1]}")
 
         pose6, grip = xyz6g_to_action_abs(act)
 
@@ -544,7 +553,11 @@ class EvalRunner:
                     self.robot.move_gripper(float(self.cfg.gripper_close_pulse))
                 self._last_grip_bin = gb
         else:
-            self.robot.move_gripper(grip)
+            grip_value = float(grip)
+            eps = float(getattr(self.cfg, "gripper_command_eps", 5.0))
+            if self._last_grip_value is None or abs(grip_value - self._last_grip_value) >= eps:
+                self.robot.move_gripper(grip_value)
+                self._last_grip_value = grip_value
 
     def _execute_step_until_done(self, pose6: np.ndarray, grip: Optional[float]) -> bool:
         """
@@ -582,6 +595,11 @@ class EvalRunner:
             return False
         if acts.shape[0] == 0:
             return True
+        try:
+            acts = self._normalize_action_units(acts)
+        except ValueError as exc:
+            rospy.logwarn(f"[EvalRunner] {exc}")
+            return False
 
         # --- Build smoothed action sequence ---
         exec_actions = []
@@ -627,10 +645,6 @@ class EvalRunner:
 
             act10 = exec_actions[j]
             pose6, grip = self._convert_action_to_robot(act10)
-            # # TODO: avoid frequent gripper command, fix this with better handling
-            if grip is not None and grip <= 100:
-                grip = None
-                
             self._send_step_command(pose6, grip)
 
             self._last_exec_action10 = act10.copy()
@@ -650,6 +664,7 @@ class EvalRunner:
 
         self.obs_buf.clear()
         self._last_grip_bin = None
+        self._last_grip_value = None
         self.state.running = False
         self.state.continue_requested = False
         self.state.reset_requested = False

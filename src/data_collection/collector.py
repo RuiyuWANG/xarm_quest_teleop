@@ -1,4 +1,4 @@
-# src/data_collection/colloter.py
+# src/data_collection/collector.py
 from __future__ import annotations
 
 import os

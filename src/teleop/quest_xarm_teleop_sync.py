@@ -476,8 +476,8 @@ class QuestXArmTeleopSync:
                         if self._reengage_i >= n:
                             self._reengaging = False
                             
-                    # HACK, disable roll
-                    desired_pose6[-3] = np.pi
+                    if self.cfg.lock_roll:
+                        desired_pose6[3] = float(self.cfg.locked_roll_rad)
 
                     # step-limited servo command toward desired
                     cmd_pose6 = self._step_toward_desired(cur6, desired_pose6)

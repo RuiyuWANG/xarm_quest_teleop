@@ -156,7 +156,7 @@ class SeekerPolicy(NetBase):
                 if im.ndim != 3 or im.shape[-1] != 3:
                     raise ValueError(f"{cam_key}: expected HWC RGB, got {im.shape}")
 
-                # HARDCODED
+                # Seeker checkpoints in this branch expect 240x240 RGB inputs.
                 im = center_square_crop(im, camera_name=cam_key)
                 target = 240
                 if (im.shape[0] != target) or (im.shape[1] != target):

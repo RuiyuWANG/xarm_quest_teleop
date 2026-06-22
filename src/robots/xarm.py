@@ -333,7 +333,6 @@ class XArmRobot:
         return CallResult(True, 0, "mode set")
 
     # ---------------- optional stop motion ----------------
-    # TODO: check if this is needed
     def stop_motion(self) -> CallResult:
         """
         Best-effort stop via /xarm/motion_ctrl (SetInt16) if available in config.
