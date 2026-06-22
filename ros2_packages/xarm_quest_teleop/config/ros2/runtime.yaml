@@ -1,0 +1,13 @@
+teleop:
+  active_hand: "right"
+  startup_timeout_s: 30.0
+  servo_rate_hz: 100.0
+
+collection:
+  enable_rgb_sync: true
+  enable_full_sync: false
+
+eval:
+  default_config: "cleanup_table_d2_dry_run.yaml"
+  enable_rgb_sync: true
+  enable_full_sync: false

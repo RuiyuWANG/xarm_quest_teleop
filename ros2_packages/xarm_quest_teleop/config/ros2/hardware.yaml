@@ -1,0 +1,52 @@
+robot:
+  dof: 7
+  robot_ip: "192.168.1.243"
+  report_type: "dev"
+  hw_ns: "xarm"
+  add_gripper: true
+  extra_robot_api_params_path: "config/ros2/xarm_api_services.yaml"
+
+quest:
+  tcp_ip: "192.168.0.181"
+  tcp_port: 10000
+
+cameras:
+  d405:
+    serial_no: "230322271104"
+    camera_name: "d405"
+    camera_namespace: ""
+    enable_color: true
+    enable_depth: false
+    rgb_camera.color_profile: "848,480,30"
+    depth_module.depth_profile: "848,480,30"
+    enable_sync: false
+    align_depth.enable: false
+    initial_reset: false
+  d435i_front:
+    serial_no: "335522071488"
+    camera_name: "d435i_front"
+    camera_namespace: ""
+    enable_color: true
+    enable_depth: true
+    rgb_camera.color_profile: "848,480,30"
+    depth_module.depth_profile: "848,480,30"
+    enable_sync: false
+    align_depth.enable: false
+    initial_reset: true
+  d435i_shoulder:
+    serial_no: "233522073481"
+    camera_name: "d435i_shoulder"
+    camera_namespace: ""
+    enable_color: true
+    enable_depth: true
+    rgb_camera.color_profile: "848,480,30"
+    depth_module.depth_profile: "848,480,30"
+    enable_sync: false
+    align_depth.enable: false
+    initial_reset: true
+
+profiles:
+  rgb:
+    cameras: ["d405", "d435i_front"]
+  all:
+    cameras: ["d405", "d435i_front", "d435i_shoulder"]

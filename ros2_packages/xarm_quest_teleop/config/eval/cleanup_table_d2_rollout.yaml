@@ -1,0 +1,13 @@
+eval_name: background
+
+profile: rollout
+ckpt: ~/ros2_ws/src/seeker-dev/experiments/cleanup_table_d2/real_policy/real_rvt2_cleanup_table_d2_seed_0/checkpoints/latest.ckpt
+task: cleanup_table_d2
+name: real_rvt2_policy
+calib: all_cams_calib.json
+result_log_dir: evaluation/
+seed: 0
+n_rollouts: 20
+horizon: 1000
+exec_horizon: 6
+live_viz: true

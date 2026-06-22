@@ -17,3 +17,4 @@ evaluation_temporal_strips/
 build/
 dist/
 *.egg-info/
+log/

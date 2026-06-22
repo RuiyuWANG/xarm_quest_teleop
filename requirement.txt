@@ -3,3 +3,6 @@ scipy
 Pillow
 opencv-python
 PyYAML
+pynput
+lmdb
+tqdm

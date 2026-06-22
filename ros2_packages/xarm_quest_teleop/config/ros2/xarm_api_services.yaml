@@ -1,0 +1,10 @@
+ufactory_driver:
+  ros__parameters:
+    services:
+      set_gripper_mode: true
+      set_gripper_enable: true
+      get_gripper_position: true
+      set_gripper_speed: true
+      set_servo_cartesian: true
+      set_servo_cartesian_aa: true
+      set_gripper_position: true
